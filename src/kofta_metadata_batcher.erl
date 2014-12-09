@@ -28,6 +28,10 @@ start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 init([]) ->
+    {ok, Hosts} = application:get_env(kofta, brokers),
+    lists:map(fun({Host, Port}) ->
+        supervisor:start_child(kofta_broker_sup, [Host, Port])
+    end, Hosts),
     State = #state{
         clients=dict:new(),
         last_batch=now()

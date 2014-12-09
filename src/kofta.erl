@@ -9,13 +9,7 @@
 -export([start/0, stop/0]).
 
 start() ->
-    % TODO: Fix this mess
-    S = application:start(kofta),
-    {ok, Hosts} = application:get_env(kofta, brokers),
-    lists:map(fun({Host, Port}) ->
-        supervisor:start_child(kofta_broker_sup, [Host, Port])
-    end, Hosts),
-    S.
+    application:start(kofta).
 
 stop() ->
     application:stop(kofta).
