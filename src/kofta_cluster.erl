@@ -2,7 +2,7 @@
 
 -export([
     get_broker/2,
-    get_random_broker/0
+    get_brokers/0
 ]).
 
 get_broker(Host, Port) ->
@@ -13,9 +13,8 @@ get_broker(Host, Port) ->
             {ok, Pid}
     end.
 
--spec get_random_broker() -> pid().
-get_random_broker() ->
+-spec get_brokers() -> [pid()].
+get_brokers() ->
     Brokers = ets:tab2list(broker_host_pids),
-    Len = length(Brokers),
-    {_BrokerID, Pid} = lists:nth(random:uniform(Len), Brokers),
-    Pid.
+    Shuffled = lists:sort([{random:uniform(), Pid} || {_BID, Pid} <- Brokers]),
+    [Pid || {_, Pid} <- Shuffled].

@@ -27,7 +27,9 @@ request(Broker, Msg) ->
     gen_server:call(Broker, {req, Msg}).
 
 start_link(Host, Port) ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [Host, Port], []).
+    LHost = binary_to_list(Host),
+    ID = "kofta_broker_" ++ LHost ++ "_" ++ integer_to_list(Port),
+    gen_server:start_link({local, list_to_atom(ID)}, ?MODULE, [Host, Port], []).
 
 init([Host, Port]) ->
     supervisor:start_child(kofta_connection_pool_sup, [Host, Port]),

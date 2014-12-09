@@ -15,24 +15,8 @@ stop() ->
     application:stop(kofta).
 
 -spec metadata(binary(), [any()]) -> {ok, [any()]} | {error, any()}.
-metadata(Topic, Options) ->
-    case lists:member(cached, Options) of
-        true ->
-            case ets:lookup(kofta_metadata, Topic) of
-                [] ->
-                    {error, not_found};
-                [{_Topic, Result}] ->
-                    {ok, Result}
-            end;
-        false ->
-            case kofta_metadata_batcher:refresh(Topic) of
-                {ok, Result} ->
-                    ets:insert(kofta_metadata, {Topic, Result}),
-                    {ok, Result};
-                {error, Reason} ->
-                    {error, Reason}
-            end
-    end.
+metadata(TopicName, Options) ->
+    kofta_metadata_batcher:lookup(TopicName, Options).
 
 -spec produce(binary(), binary(), binary(), [any()]) -> ok.
 produce(Topic, Key, Value, Options) ->

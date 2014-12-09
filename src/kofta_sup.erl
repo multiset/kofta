@@ -16,8 +16,8 @@ init([]) ->
     ets:new(broker_id_pids, [named_table, public]),
     ets:new(broker_host_pids, [named_table, public]),
     {ok, {{one_for_one, 5, 10}, [
-        ?CHILD(kofta_broker_sup, supervisor),
         ?CHILD(kofta_connection_pool_sup, supervisor),
+        ?CHILD(kofta_broker_sup, supervisor),
         ?CHILD(kofta_producer_batcher_sup, supervisor),
         ?CHILD(kofta_metadata_batcher, worker)
     ]}}.
