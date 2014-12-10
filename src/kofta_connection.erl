@@ -26,7 +26,7 @@
 }).
 
 request(Host, Port, Msg) ->
-    PoolName = kofta_connection_pool:name(Host, Port),
+    PoolName = kofta_connection:name(Host, Port),
     poolboy:transaction(PoolName, fun(Worker) ->
         gen_server:call(Worker, {req, Msg})
     end).
