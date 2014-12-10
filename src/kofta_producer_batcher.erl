@@ -2,9 +2,12 @@
 
 -behaviour(gen_server).
 
--export([send/4]).
+-export([
+    send/4,
+    name/2
+]).
 
--export([start_link/0]).
+-export([start_link/2]).
 
 -export([
     init/1,
@@ -19,20 +22,25 @@
     clients,
     msgs,
     last_batch,
-    max_latency=100
+    max_latency=100,
+    host,
+    port
 }).
 
 send(Topic, Partition, Key, Value) ->
-    gen_server:call(?MODULE, {msg, Topic, Partition, Key, Value}).
+    {ok, {Host, Port}} = kofta_metadata:get_leader(Topic, Partition),
+    gen_server:call(name(Host, Port), {msg, Topic, Partition, Key, Value}).
 
-start_link() ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+start_link(Host, Port) ->
+    gen_server:start_link({local, name(Host, Port)}, ?MODULE, [Host, Port], []).
 
-init([]) ->
+init([Host, Port]) ->
     State = #state{
         clients=dict:new(),
         last_batch=now(),
-        msgs=dict:new()
+        msgs=dict:new(),
+        host=Host,
+        port=Port
     },
     {ok, State}.
 
@@ -81,72 +89,63 @@ maybe_make_request(State) ->
 make_request(State) ->
     #state{
         clients=ClientDict,
-        msgs=MsgDict
+        msgs=MsgDict,
+        host=Host,
+        port=Port
     } = State,
 
-    LeaderMsgs = dict:fold(fun({Topic, Partition}, KVs, Acc) ->
-        {ok, {_, Brokers, TInfo}} = case kofta:metadata(Topic, [cached]) of
-            {error, not_found} ->
-                kofta:metadata(Topic, []);
-            {ok, Metadata} ->
-                {ok, Metadata}
-        end,
-        {_TErr, _Topic, PInfo} = lists:keyfind(Topic, 2, TInfo),
-        {_PErr, _PartID, Leader, _Rep, _Isr} = lists:keyfind(Partition, 2, PInfo),
-        {_Leader, Host, Port} = lists:keyfind(Leader, 1, Brokers),
-        dict:append({Host, Port}, {Topic, Partition, KVs}, Acc)
-    end, dict:new(), MsgDict),
+    % This bit here formats the accumulated messages to be encoded for the
+    % kafka binary protocol
+    TopicParts = lists:sort(dict:fetch_keys(MsgDict)),
+    FinalAcc = lists:foldl(fun({Topic, PartID}, Acc) ->
+        Msgs = dict:fetch({Topic, PartID}, MsgDict),
+        case Acc of
+            {_Nil, [], []} ->
+                {Topic, [{PartID, Msgs}], []};
+            {Topic, PartAcc, TopicAcc} ->
+                {Topic, [{PartID, Msgs}|PartAcc], TopicAcc};
+            {OldTopic, PartAcc, TopicAcc} ->
+                {Topic, [{PartID, Msgs}], [{OldTopic, PartAcc}|TopicAcc]}
+        end
+    end, {nil, [], []}, TopicParts),
+    RequestData = case FinalAcc of
+        {_Topic, [], TopicAcc} ->
+            TopicAcc;
+        {Topic, PartAcc, TopicAcc} ->
+            [{Topic, PartAcc}|TopicAcc]
+    end,
 
-    Aggregated = dict:map(fun(_HostPort, PartMsgs) ->
-        {FinalTopic, FinalTAcc, FinalAcc} = lists:foldl(fun
-            ({Topic, PartID, KVs}, {first, [], []}) ->
-                {Topic, [{PartID, KVs}], []};
-            ({Topic, PartID, KVs}, {Topic, TAcc, Acc}) ->
-                {Topic, [{PartID, KVs}|TAcc], Acc};
-            ({NewTopic, PartID, KVs}, {OldTopic, TAcc, Acc}) ->
-                {NewTopic, [{PartID, KVs}], [{OldTopic, TAcc}|Acc]}
-        end, {first, [], []}, lists:keysort(1, PartMsgs)),
-        [{FinalTopic, FinalTAcc}|FinalAcc]
-    end, LeaderMsgs),
+    ProduceBinBody = kofta_encode:array(fun({Topic, Partitions}) ->
+        PartBin = kofta_encode:array(fun({PartID, Msgs}) ->
+            MsgSet = kofta_encode:message_set(Msgs),
+            [<<PartID:32/big-signed-integer,
+             (iolist_size(MsgSet)):32/big-signed-integer>>,
+             MsgSet]
+        end, Partitions),
+        [kofta_encode:string(Topic), PartBin]
+    end, RequestData),
+    Header = <<1:16/big-signed-integer, 10000:32/big-signed-integer>>,
+    BinRequest = kofta_encode:request(0, 0, 0, <<>>, [Header,ProduceBinBody]),
 
-    Requests = dict:map(fun(_HostPort, ProduceData) ->
-        ProduceBinBody = kofta_encode:array(fun({Topic, Partitions}) ->
-            PartBin = kofta_encode:array(fun({PartID, Msgs}) ->
-                MsgSet = kofta_encode:message_set(Msgs),
-                [<<PartID:32/big-signed-integer,
-                 (iolist_size(MsgSet)):32/big-signed-integer>>,
-                 MsgSet]
-            end, Partitions),
-            [kofta_encode:string(Topic), PartBin]
-        end, ProduceData),
-        Request = [
-            <<1:16/big-signed-integer, 10000:32/big-signed-integer>>,
-            ProduceBinBody
-        ],
-        kofta_encode:request(0, 0, 0, <<>>, Request)
-    end, Aggregated),
+    {ok, Response} = kofta_connection:request(Host, Port, BinRequest),
+    {Request, Rest0} = kofta_decode:request(Response),
+    {Body, <<>>} = kofta_decode:array(fun(Binary0) ->
+        {TopicName, IRest0} = kofta_decode:string(Binary0),
+        {PartResps, IRest2} = kofta_decode:array(fun(Binary1) ->
+            <<PartitionID:32/big-signed-integer,
+              ErrorCode:16/big-signed-integer,
+              Offset:64/big-signed-integer,
+              IRest1/binary>> = Binary1,
+            {{PartitionID, ErrorCode, Offset}, IRest1}
+        end, IRest0),
+        {{TopicName, PartResps}, IRest2}
+    end, Rest0),
 
-    % TODO: Parallelize this
-    Responses = dict:fold(fun({Host, Port}, Data, Acc) ->
-        {ok, Response} = kofta_connection:request(Host, Port, Data),
-        {Request, Rest0} = kofta_decode:request(Response),
-        {Body, <<>>} = kofta_decode:array(fun(Binary0) ->
-            {TopicName, IRest0} = kofta_decode:string(Binary0),
-            {PartResps, IRest2} = kofta_decode:array(fun(Binary1) ->
-                <<PartitionID:32/big-signed-integer,
-                  ErrorCode:16/big-signed-integer,
-                  Offset:64/big-signed-integer,
-                  IRest1/binary>> = Binary1,
-                {{PartitionID, ErrorCode, Offset}, IRest1}
-            end, IRest0),
-            {{TopicName, PartResps}, IRest2}
-        end, Rest0),
-        lists:foldl(fun({TopicName, PartInfo}, IntAcc) ->
-            lists:foldl(fun({PartID, _ErrCode, _Offset}, IntAcc1) ->
-                dict:store({TopicName, PartID}, {Request, Body}, IntAcc1)
-            end, IntAcc, PartInfo)
-        end, Acc, Body)
-    end, dict:new(), Requests),
+    Responses = lists:foldl(fun({TopicName, PartInfo}, IntAcc) ->
+        lists:foldl(fun({PartID, _ErrCode, _Offset}, IntAcc1) ->
+            dict:store({TopicName, PartID}, {Request, Body}, IntAcc1)
+        end, IntAcc, PartInfo)
+    end, dict:new(), Body),
 
     dict:map(fun({Topic, Partition}, Clients) ->
         lists:map(fun(Client) ->
@@ -169,3 +168,8 @@ get_timeout(State) ->
         Diff ->
             Diff/1000
     end.
+
+name(Host, Port) ->
+    LHost = binary_to_list(Host),
+    LPort = integer_to_list(Port),
+    list_to_atom("kofta_producer_batcher_" ++ LHost ++ "_" ++ LPort).

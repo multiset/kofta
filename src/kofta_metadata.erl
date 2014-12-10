@@ -1,8 +1,11 @@
--module(kofta_metadata_batcher).
+-module(kofta_metadata).
 
 -behaviour(gen_server).
 
--export([lookup/2]).
+-export([
+    lookup/1,
+    get_leader/2
+]).
 
 -export([start_link/0]).
 
@@ -33,23 +36,33 @@
     status
 }).
 
-lookup(TopicName, Options) ->
-    case lists:member(cached, Options) of
-        true ->
-            case ets:lookup(kofta_metadata, TopicName) of
-                [] ->
-                    {error, not_found};
-                [Topic] ->
-                    {ok, Topic}
-            end;
-        false ->
-            case gen_server:call(?MODULE, {lookup, TopicName}) of
+get_leader(TopicName, PartitionID) ->
+    case ets_lru:lookup_d(kofta_leader_lru, {TopicName, PartitionID}) of
+        {ok, Leader} ->
+            {ok, Leader};
+        not_found ->
+            case lookup(TopicName) of
                 {ok, Topic} ->
-                    ets:insert(kofta_metadata, Topic),
-                    {ok, Topic};
+                    Partition = lists:keyfind(
+                        PartitionID,
+                        #partition.id,
+                        Topic#topic.partitions
+                    ),
+                    {ok, Partition#partition.leader};
                 {error, Reason} ->
                     {error, Reason}
-        end
+            end
+    end.
+
+lookup(TopicName) ->
+    case gen_server:call(?MODULE, {lookup, TopicName}) of
+        {ok, Topic} ->
+            lists:map(fun(#partition{id=ID, leader=Leader}) ->
+                ets_lru:insert(kofta_leader_lru, {TopicName, ID}, Leader)
+            end, Topic#topic.partitions),
+            {ok, Topic};
+        {error, Reason} ->
+            {error, Reason}
     end.
 
 start_link() ->
@@ -125,7 +138,7 @@ make_request(State) ->
                             end, Clients)
                         end, Topics),
                         true;
-                    {error, Reason} ->
+                    {error, _Reason} ->
                         false
                 end;
             true ->

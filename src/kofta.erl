@@ -14,9 +14,9 @@ start() ->
 stop() ->
     application:stop(kofta).
 
--spec metadata(binary(), [any()]) -> {ok, [any()]} | {error, any()}.
-metadata(TopicName, Options) ->
-    kofta_metadata_batcher:lookup(TopicName, Options).
+-spec metadata(binary()) -> {ok, [any()]} | {error, any()}.
+metadata(TopicName) ->
+    kofta_metadata:lookup(TopicName).
 
 -spec produce(binary(), binary(), binary(), [any()]) -> ok.
 produce(Topic, Key, Value, Options) ->
