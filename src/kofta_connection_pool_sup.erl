@@ -2,16 +2,24 @@
 
 -behaviour(supervisor).
 
--export([start_link/0]).
-
--export([init/1]).
+-export([
+    start_link/0,
+    init/1
+]).
 
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 init([]) ->
-    Spec = {
-        kofta_connection_sup, {kofta_connection_sup, start_link, []},
-        transient, 5000, supervisor, [kofta_connection_sup]
-    },
-    {ok, {{simple_one_for_one, 5, 10}, [Spec]}}.
+    {ok, Brokers} = application:get_env(kofta, brokers),
+    {ok, Size} = application:get_env(kofta, connection_pool_size),
+    PoolSpecs = lists:map(fun({Host, Port}) ->
+        PoolName = kofta_connection_pool:name(Host, Port),
+        PoolArgs = [
+            {name, {local, PoolName}},
+            {worker_module, kofta_connection},
+            {size, Size}
+        ],
+        poolboy:child_spec(PoolName, PoolArgs, [Host, Port])
+    end, Brokers),
+    {ok, {{one_for_all, 5, 10}, PoolSpecs}}.

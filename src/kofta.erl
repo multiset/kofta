@@ -37,11 +37,6 @@ fetch(Topic, PartID, Options) ->
     {_Error, _Topic, Parts} = lists:keyfind(Topic, 2, TopicMetadata),
     {_PError, _Part, Leader, _Replicas, _Isr} = lists:keyfind(PartID, 2, Parts),
     {_, LeaderHost, LeaderPort} = lists:keyfind(Leader, 1, Brokers),
-    case kofta_cluster:get_broker(LeaderHost, LeaderPort) of
-        {ok, Broker} ->
-            Message = kofta_fetch:encode([{Topic, [{PartID, Offset, MaxBytes}]}]),
-            {ok, Response} = kofta_broker:request(Broker, Message),
-            kofta_fetch:decode(Response);
-        {error, not_found} ->
-            leader_not_found
-    end.
+    Message = kofta_fetch:encode([{Topic, [{PartID, Offset, MaxBytes}]}]),
+    {ok, Response} = kofta_connection:request(LeaderHost, LeaderPort, Message),
+    kofta_fetch:decode(Response).

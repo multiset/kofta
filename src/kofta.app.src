@@ -9,6 +9,10 @@
                  ]},
   {mod, { kofta_app, []}},
   {env, [
-    {brokers, [{<<"localhost">>, 9092}]}
+    {brokers, [
+      {<<"localhost">>, 9092},
+      {<<"localhost">>, 9093},
+      {<<"localhost">>, 9094}]},
+    {connection_pool_size, 10}
   ]}
  ]}.

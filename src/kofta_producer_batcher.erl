@@ -128,8 +128,7 @@ make_request(State) ->
 
     % TODO: Parallelize this
     Responses = dict:fold(fun({Host, Port}, Data, Acc) ->
-        {ok, Broker} = kofta_cluster:get_broker(Host, Port),
-        {ok, Response} = kofta_broker:request(Broker, Data),
+        {ok, Response} = kofta_connection:request(Host, Port, Data),
         {Request, Rest0} = kofta_decode:request(Response),
         {Body, <<>>} = kofta_decode:array(fun(Binary0) ->
             {TopicName, IRest0} = kofta_decode:string(Binary0),

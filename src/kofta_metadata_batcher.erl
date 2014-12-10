@@ -112,10 +112,10 @@ make_request(State) ->
     Data = encode(TopicNames),
     Brokers = kofta_cluster:get_brokers(),
 
-    Success = lists:foldl(fun(Broker, Acc) ->
+    Success = lists:foldl(fun({Host, Port}, Acc) ->
         case Acc of
             false ->
-                case kofta_broker:request(Broker, Data) of
+                case kofta_connection:request(Host, Port, Data) of
                     {ok, Response} ->
                         {ok, Topics} = decode(Response),
                         lists:map(fun(Topic) ->
@@ -125,7 +125,7 @@ make_request(State) ->
                             end, Clients)
                         end, Topics),
                         true;
-                    {error, _Reason} ->
+                    {error, Reason} ->
                         false
                 end;
             true ->

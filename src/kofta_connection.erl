@@ -1,8 +1,9 @@
 -module(kofta_connection).
 
 -behaviour(gen_server).
+-behaviour(poolboy_worker).
 
--export([start_link/2]).
+-export([start_link/1]).
 
 -export([
     init/1,
@@ -13,31 +14,39 @@
     code_change/3
 ]).
 
+-export([
+    request/3,
+    name/2
+]).
+
 -record(state, {
     host,
     port,
     sock
 }).
 
-start_link(Host, Port) ->
+request(Host, Port, Msg) ->
+    PoolName = kofta_connection_pool:name(Host, Port),
+    poolboy:transaction(PoolName, fun(Worker) ->
+        gen_server:call(Worker, {req, Msg})
+    end).
+
+start_link([Host, Port]) ->
     LHost = binary_to_list(Host),
-    case gen_tcp:connect(LHost, Port, [binary, {packet, 0}, {active, false}]) of
+    SockOpts = [binary, {packet, 0}, {active, false}],
+    case gen_tcp:connect(LHost, Port, SockOpts) of
         {ok, Sock} ->
-            % It'd probably be good to use something other than uuids here
-            UUID = uuid:to_string(uuid:uuid4()),
-            Name = atom_to_list(?MODULE) ++ "_" ++ UUID,
-            gen_server:start_link({local, list_to_atom(Name)}, ?MODULE, [LHost, Port, Sock], []);
+            gen_server:start_link(
+                ?MODULE,
+                [LHost, Port, Sock],
+                []
+            );
         {error, Reason} ->
             {error, Reason}
     end.
 
 init([Host, Port, Sock]) ->
-    State = #state{
-        host=Host,
-        port=Port,
-        sock=Sock
-    },
-    {ok, State}.
+    {ok, #state{host=Host, port=Port, sock=Sock}}.
 
 handle_call({req, Binary}, _From, State) ->
     go(Binary, State).
@@ -83,3 +92,8 @@ terminate(_Reason, _State) ->
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
+
+name(Host, Port) ->
+    LHost = binary_to_list(Host),
+    LPort = integer_to_list(Port),
+    list_to_atom("kofta_connection_pool_" ++ LHost ++ "_" ++ LPort).
