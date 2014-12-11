@@ -19,13 +19,17 @@ init([Host, Port]) ->
         {worker_module, kofta_connection},
         {size, Size}
     ],
-    Name = kofta_producer_batcher:name(Host, Port),
     {ok, {{one_for_one, 5, 10}, [
         poolboy:child_spec(PoolName, PoolArgs, [Host, Port]),
         {
-            Name,
+            kofta_producer_batcher:name(Host, Port),
+            {kofta_metadata, start_link, [Host, Port]},
+            transient, 5000, worker, [kofta_metadata]
+        },
+        {
+            kofta_metadata:name(Host, Port),
             {kofta_producer_batcher, start_link, [Host, Port]},
-            permanent, 5000, worker, [kofta_producer_batcher]
+            transient, 5000, worker, [kofta_producer_batcher]
         }
     ]}}.
 
