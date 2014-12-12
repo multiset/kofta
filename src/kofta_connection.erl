@@ -16,76 +16,150 @@
 
 -export([
     request/3,
+    request/4,
     name/2
 ]).
 
 -record(state, {
     host,
     port,
-    sock
+    sock,
+    from,
+    request,
+    timeout,
+    last_response
 }).
 
 request(Host, Port, Msg) ->
+    request(Host, Port, Msg, 5000).
+
+request(Host, Port, Msg, Timeout) ->
     PoolName = kofta_connection:name(Host, Port),
     poolboy:transaction(PoolName, fun(Worker) ->
-        gen_server:call(Worker, {req, Msg})
+        Ref = make_ref(),
+        Worker ! {'$gen_call', {self(), Ref}, {req, Msg, Timeout}},
+        get_rest(Ref, <<>>, Timeout)
     end).
+
+get_rest(Ref, Acc, Timeout) ->
+    receive
+        {Ref, {cont, Data}} ->
+            get_rest(Ref, <<Acc/binary, Data/binary>>, Timeout);
+        {Ref, {done, Data}} ->
+            {ok, <<Acc/binary, Data/binary>>};
+        {_OldRef, _Msg} ->
+            get_rest(Ref, Acc, Timeout)
+    after Timeout ->
+        {error, timeout}
+    end.
+
 
 start_link([Host, Port]) ->
     LHost = binary_to_list(Host),
-    SockOpts = [binary, {packet, 0}, {active, false}],
-    case gen_tcp:connect(LHost, Port, SockOpts) of
-        {ok, Sock} ->
-            gen_server:start_link(
-                ?MODULE,
-                [LHost, Port, Sock],
-                []
-            );
-        {error, Reason} ->
-            {error, Reason}
+    gen_server:start_link(?MODULE, [LHost, Port], []).
+
+init([Host, Port]) ->
+    {ok, #state{host=Host, port=Port}}.
+
+handle_call({req, Binary, Timeout}, From, State) ->
+    NewState = State#state{
+        from=From,
+        request=Binary,
+        timeout=Timeout,
+        last_response=os:timestamp()
+    },
+    go(NewState).
+
+format_response(State) ->
+    #state{
+        timeout=MaxTimeout,
+        last_response=Last
+    } = State,
+    case timer:now_diff(Last, os:timestamp()) of
+        Diff when Diff >= MaxTimeout ->
+            NewState = State#state{
+                from=undefined,
+                request=undefined,
+                timeout=undefined,
+                last_response=undefined
+            },
+            {noreply, NewState};
+        _Diff ->
+            {noreply, State, 1000}
     end.
 
-init([Host, Port, Sock]) ->
-    {ok, #state{host=Host, port=Port, sock=Sock}}.
-
-handle_call({req, Binary}, _From, State) ->
-    go(Binary, State).
-
-go(Binary, State) ->
+go(#state{sock=undefined}=State) ->
+    #state{host=Host, port=Port} = State,
+    case open_socket(Host, Port) of
+        {ok, Sock} ->
+            go(State#state{sock=Sock});
+        {error, _Reason} ->
+            format_response(State)
+    end;
+go(State) ->
     #state{
-        sock=Sock
+        sock=Sock,
+        request=Binary,
+        timeout=Timeout
     } = State,
-    Reply = case gen_tcp:send(Sock, Binary) of
+    case gen_tcp:send(Sock, Binary) of
         ok ->
-            case gen_tcp:recv(Sock, 0) of
+            case gen_tcp:recv(Sock, 0, Timeout) of
                 {ok, Data} ->
                     <<Size:32/big-signed-integer, Rest/binary>> = Data,
-                    TotalData = accumulate(Sock, Size-byte_size(Rest), Data),
-                    {ok, TotalData};
+                    RestBytes = Size-byte_size(Rest),
+                    case accumulate(State, RestBytes, Data) of
+                        {ok, NewState} ->
+                            {noreply, NewState};
+                        {error, _Reason, NewState} ->
+                            format_response(NewState)
+                    end;
                 {error, RecvError} ->
-                    {error, RecvError}
+                    lager:error("RecvError: ~p", [RecvError]),
+                    format_response(State)
             end;
         {error, SendError} ->
-            {error, SendError}
-    end,
-    {reply, Reply, State}.
-
-accumulate(_Sock, 0, Acc) ->
-    Acc;
-accumulate(Sock, Remaining, Acc) ->
-    case gen_tcp:recv(Sock, 0) of
-        {ok, Data} ->
-            accumulate(Sock, Remaining-byte_size(Data), <<Acc/binary, Data/binary>>);
-        {error, Reason} ->
-            {error, Reason}
+            lager:error("SendError: ~p", [SendError]),
+            format_response(State)
     end.
 
+open_socket(Host, Port) ->
+    SockOpts = [binary, {packet, 0}, {active, false}],
+    gen_tcp:connect(Host, Port, SockOpts).
+
+accumulate(State, 0, Last) ->
+    #state{from=From} = State,
+    gen_server:reply(From, {done, Last}),
+    NewState = State#state{
+        from=undefined,
+        request=undefined,
+        timeout=undefined,
+        last_response=undefined
+    },
+    {ok, NewState};
+accumulate(State, Remaining, Last) ->
+    #state{from=From, sock=Sock, timeout=Timeout} = State,
+    gen_server:reply(From, {cont, Last}),
+    NewState = State#state{last_response=os:timestamp()},
+    case gen_tcp:recv(Sock, 0, Timeout) of
+        {ok, Data} ->
+            accumulate(NewState, Remaining-byte_size(Data), Data);
+        {error, Reason} ->
+            lager:error("accumulate error: ~p", [Reason]),
+            {error, Reason, NewState}
+    end.
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
 handle_info(timeout, State) ->
-    {noreply, State}.
+    #state{host=Host, port=Port} = State,
+    case open_socket(Host, Port) of
+        {ok, Sock} ->
+            go(State#state{sock=Sock});
+        {error, _Reason} ->
+            {noreply, State, 1000}
+    end.
 
 terminate(_Reason, _State) ->
     ok.
