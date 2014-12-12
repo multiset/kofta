@@ -114,12 +114,10 @@ go(State) ->
                         {error, _Reason, NewState} ->
                             format_response(NewState)
                     end;
-                {error, RecvError} ->
-                    lager:error("RecvError: ~p", [RecvError]),
+                {error, _RecvError} ->
                     format_response(State)
             end;
-        {error, SendError} ->
-            lager:error("SendError: ~p", [SendError]),
+        {error, _SendError} ->
             format_response(State)
     end.
 
@@ -145,7 +143,6 @@ accumulate(State, Remaining, Last) ->
         {ok, Data} ->
             accumulate(NewState, Remaining-byte_size(Data), Data);
         {error, Reason} ->
-            lager:error("accumulate error: ~p", [Reason]),
             {error, Reason, NewState}
     end.
 
