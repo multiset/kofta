@@ -1,27 +1,37 @@
 -module(kofta_metadata).
 
--behaviour(gen_server).
+-behaviour(gen_fsm).
 
--export([
-    lookup/1,
-    get_leader/2
-]).
-
--export([start_link/0]).
+-export([start_link/2]).
 
 -export([
     init/1,
-    handle_call/3,
-    handle_cast/2,
-    handle_info/2,
-    terminate/2,
-    code_change/3
+    ready/2,
+    ready/3,
+    disconnected/2,
+    disconnected/3,
+    handle_event/3,
+    handle_sync_event/4,
+    handle_info/3,
+    terminate/3,
+    code_change/4
+]).
+
+-export([
+    lookup/1,
+    get_leader/2,
+    name/2
 ]).
 
 -record(state, {
     clients,
     last_batch,
-    max_latency=100
+    max_latency=100,
+    host,
+    port,
+    status,
+    last_reconnect,
+    reconnect_interval=1000
 }).
 
 -record(topic, {
@@ -55,7 +65,8 @@ get_leader(TopicName, PartitionID) ->
     end.
 
 lookup(TopicName) ->
-    case gen_server:call(?MODULE, {lookup, TopicName}) of
+    {ok, {Host, Port}} = kofta_cluster:get_active_broker(),
+    case gen_fsm:sync_send_event(name(Host, Port), {lookup, TopicName}) of
         {ok, Topic} ->
             lists:map(fun(#partition{id=ID, leader=Leader}) ->
                 ets_lru:insert(kofta_leader_lru, {TopicName, ID}, Leader)
@@ -65,113 +76,152 @@ lookup(TopicName) ->
             {error, Reason}
     end.
 
-start_link() ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+start_link(Host, Port) ->
+    gen_fsm:start_link({local, name(Host, Port)}, ?MODULE, [Host, Port], []).
 
-init([]) ->
+init([Host, Port]) ->
     State = #state{
-        clients=dict:new(),
-        last_batch=now()
+        host=Host,
+        port=Port,
+        last_batch=now(),
+        last_reconnect=now(),
+        clients=dict:new()
     },
-    {ok, State}.
+    {ok, disconnected, State, 0}.
 
-handle_call({lookup, Topic}, From, State0) ->
+do_request(TopicNames, Host, Port) ->
+    Data = encode(TopicNames),
+    case kofta_connection:request(Host, Port, Data) of
+        {ok, Response} ->
+            {ok, _Brokers, Topics} = decode(Response),
+            {ok, Topics};
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+reconnect(Host, Port) ->
+    case do_request([], Host, Port) of
+        {ok, _} ->
+            true;
+        {error, _Reason} ->
+            false
+    end.
+
+disconnected(timeout, State) ->
+    #state{host=Host, port=Port, reconnect_interval=Timeout} = State,
+    case reconnect(Host, Port) of
+        true ->
+            kofta_cluster:activate_broker(Host, Port),
+            {next_state, ready, State, Timeout};
+        false ->
+            {next_state, disconnected, State, Timeout}
+    end.
+
+disconnected(_Msg, _From, State) ->
+    #state{
+        last_reconnect=LastReconnect,
+        reconnect_interval=ReconnectInterval,
+        host=Host,
+        port=Port
+    } = State,
+
+    {NextState, Timeout} = case get_timeout(LastReconnect, ReconnectInterval) of
+        0 ->
+            case reconnect(Host, Port) of
+                true ->
+                    {ready, 0};
+                false ->
+                    {disconnected, ReconnectInterval}
+            end;
+        Timeout0 ->
+            {disconnected, Timeout0}
+    end,
+
+    NewState = State#state{last_reconnect=os:timestamp()},
+    {reply, {error, broker_down}, NextState, NewState, Timeout}.
+
+ready(timeout, State) ->
+    maybe_timeout(State).
+
+ready({lookup, Topic}, From, State0) ->
     #state{clients=Clients} = State0,
     State1 = State0#state{
         clients=dict:append(Topic, From, Clients)
     },
-    format_return(noreply, State1).
+    maybe_timeout(State1).
 
-handle_cast(_Msg, State) ->
-    format_return(noreply, State).
+handle_event(_Event, StateName, State) ->
+    {next_state, StateName, State}.
 
-handle_info(timeout, State) ->
-    format_return(noreply, State).
+handle_sync_event(_Event, _From, StateName, State) ->
+    {reply, ok, StateName, State}.
 
-terminate(_Reason, _State) ->
+handle_info(_Info, StateName, State) ->
+    {next_state, StateName, State}.
+
+terminate(_Reason, _StateName, _State) ->
     ok.
 
-code_change(_OldVsn, State, _Extra) ->
-    format_return(ok, State).
+code_change(_OldVsn, StateName, State, _Extra) ->
+    {ok, StateName, State}.
 
-format_return(Type, State) ->
+maybe_timeout(State) ->
     #state{
-        clients=Clients
+        clients=Clients,
+        last_batch=LastBatch,
+        max_latency=MaxLatency
     } = State,
     % is_empty isn't in r16
     case dict:size(Clients) of
         0 ->
-            {Type, State};
+            {next_state, ready, State};
         _ ->
-            NewState = maybe_make_request(State),
-            {Type, NewState, get_timeout(NewState)}
-    end.
-
-maybe_make_request(State) ->
-    #state{last_batch=LastBatch, max_latency=MaxLatency} = State,
-    case timer:now_diff(os:timestamp(), LastBatch)/1000 of
-        Diff when Diff >= MaxLatency ->
-            make_request(State);
-        _ ->
-            State
+            case get_timeout(LastBatch, MaxLatency) of
+                0 ->
+                    make_request(State);
+                Timeout ->
+                    {next_state, ready, State, Timeout}
+            end
     end.
 
 make_request(State) ->
     #state{
-        clients=ClientDict
+        clients=ClientDict,
+        host=Host,
+        port=Port,
+        reconnect_interval=Timeout
     } = State,
 
     TopicNames = dict:fetch_keys(ClientDict),
-    Data = encode(TopicNames),
-    Brokers = kofta_cluster:get_brokers(),
 
-    Success = lists:foldl(fun({Host, Port}, Acc) ->
-        case Acc of
-            false ->
-                case kofta_connection:request(Host, Port, Data) of
-                    {ok, Response} ->
-                        {ok, Topics} = decode(Response),
-                        lists:map(fun(Topic) ->
-                            Clients = dict:fetch(Topic#topic.name, ClientDict),
-                            lists:map(fun(Client) ->
-                                gen_server:reply(Client, {ok, Topic})
-                            end, Clients)
-                        end, Topics),
-                        true;
-                    {error, _Reason} ->
-                        false
-                end;
-            true ->
-                true
-        end
-    end, false, Brokers),
+    NewState = State#state{clients=dict:new(), last_batch=now()},
 
-    case Success of
-        true ->
-            ok;
-        false ->
-            dict:map(fun(_Topic, Clients) ->
+    case do_request(TopicNames, Host, Port) of
+        {ok, Topics} ->
+            lists:map(fun(Topic) ->
+                Clients = dict:fetch(Topic#topic.name, ClientDict),
                 lists:map(fun(Client) ->
-                    gen_server:reply(Client, {error, all_brokers_down})
+                    gen_server:reply(Client, {ok, Topic})
                 end, Clients)
-            end, ClientDict)
-    end,
+            end, Topics),
+            {next_state, ready, NewState};
+        {error, Reason} ->
+            kofta_cluster:deactivate_broker(Host, Port),
+            lists:map(fun(TopicName) ->
+                Clients = dict:fetch(TopicName, ClientDict),
+                lists:map(fun(Client) ->
+                    gen_server:reply(Client, {error, Reason})
+                end, Clients)
+            end, TopicNames),
 
-    State#state{clients=dict:new(), last_batch=now()}.
-
-get_timeout(State) ->
-    #state{
-        last_batch=LastBatch,
-        max_latency=MaxLatency
-    } = State,
-
-    NowDiff = timer:now_diff(os:timestamp(), LastBatch)/1000,
-    case NowDiff - MaxLatency of
-        Diff when Diff < 0 ->
-            0;
-        Diff ->
-            Diff/1000
+            {next_state, disconnected, NewState, Timeout}
     end.
+
+
+get_timeout(Last, Max) ->
+    NowDiff = timer:now_diff(os:timestamp(), Last)/1000,
+    Timeout = Max - NowDiff,
+    max(0, round(Timeout)).
 
 
 -spec encode([binary()]) -> binary().
@@ -189,7 +239,7 @@ decode(Binary) ->
         dict:store(BrokerID, {Host, Port}, Acc)
     end, dict:new(), Brokers),
 
-    Result = lists:map(fun({TopicErr, Name, PartInfo}) ->
+    Topics = lists:map(fun({TopicErr, Name, PartInfo}) ->
         TopicStatus = kofta_util:error_to_atom(TopicErr),
         Topic = #topic{name=Name, status=TopicStatus},
         Parts = lists:map(fun({PartErr, PartID, Leader, _Reps, _Isr}) ->
@@ -199,4 +249,7 @@ decode(Binary) ->
         end, PartInfo),
         Topic#topic{partitions=Parts}
     end, TopicMetadata),
-    {ok, Result}.
+    {ok, Brokers, Topics}.
+
+name(Host, Port) ->
+    list_to_atom("kofta_metadata_" ++ binary_to_list(Host) ++ "_" ++ integer_to_list(Port)).

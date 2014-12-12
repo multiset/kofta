@@ -16,6 +16,5 @@ init([]) ->
     ets:new(broker_host_pids, [named_table, public]),
     {ok, {{one_for_one, 5, 10}, [
         ?CHILD(ets_lru, worker, [kofta_leader_lru, [{max_size, 1024*1024}]]),
-        ?CHILD(kofta_cluster_sup, supervisor, []),
-        ?CHILD(kofta_metadata, worker, [])
+        ?CHILD(kofta_cluster_sup, supervisor, [])
     ]}}.
