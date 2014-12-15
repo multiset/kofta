@@ -2,7 +2,7 @@
 
 -export([
     metadata/1,
-    produce/4,
+    produce/3,
     fetch/3
 ]).
 
@@ -18,10 +18,10 @@ stop() ->
 metadata(TopicName) ->
     kofta_metadata:lookup(TopicName).
 
--spec produce(binary(), binary(), binary(), [any()]) -> ok.
-produce(Topic, Key, Value, Options) ->
+-spec produce(binary(), [{binary(), binary()}], [any()]) -> ok | {error, any()}.
+produce(Topic, KVs, Options) ->
     {partition, Partition} = lists:keyfind(partition, 1, Options),
-    kofta_producer_batcher:send(Topic, Partition, Key, Value).
+    kofta_producer_batcher:send(Topic, Partition, KVs).
 
 -spec fetch(binary(), integer(), [any()]) -> {ok, [binary()]} | {error, any()}.
 fetch(Topic, PartID, Options) ->

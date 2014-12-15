@@ -3,7 +3,7 @@
 -behaviour(gen_server).
 
 -export([
-    send/4,
+    send/3,
     name/2
 ]).
 
@@ -27,9 +27,9 @@
     port
 }).
 
-send(Topic, Partition, Key, Value) ->
+send(Topic, Partition, KVs) ->
     {ok, {Host, Port}} = kofta_metadata:get_leader(Topic, Partition),
-    gen_server:call(name(Host, Port), {msg, Topic, Partition, Key, Value}).
+    gen_server:call(name(Host, Port), {msg, Topic, Partition, KVs}).
 
 start_link(Host, Port) ->
     gen_server:start_link({local, name(Host, Port)}, ?MODULE, [Host, Port], []).
@@ -44,11 +44,11 @@ init([Host, Port]) ->
     },
     {ok, State}.
 
-handle_call({msg, Topic, Partition, Key, Value}, From, State0) ->
+handle_call({msg, Topic, Partition, KVs}, From, State0) ->
     #state{clients=Clients, msgs=Msgs} = State0,
     State1 = State0#state{
         clients=dict:append({Topic, Partition}, From, Clients),
-        msgs=dict:append({Topic, Partition}, {Key, Value}, Msgs)
+        msgs=dict:append_list({Topic, Partition}, KVs, Msgs)
     },
     format_return(noreply, State1).
 
