@@ -20,7 +20,7 @@
     name/2
 ]).
 
--record(state, {
+-record(st, {
     host,
     port,
     sock,
@@ -59,10 +59,10 @@ start_link([Host, Port]) ->
     gen_server:start_link(?MODULE, [LHost, Port], []).
 
 init([Host, Port]) ->
-    {ok, #state{host=Host, port=Port}}.
+    {ok, #st{host=Host, port=Port}}.
 
 handle_call({req, Binary, Timeout}, From, State) ->
-    NewState = State#state{
+    NewState = State#st{
         from=From,
         request=Binary,
         timeout=Timeout,
@@ -71,13 +71,13 @@ handle_call({req, Binary, Timeout}, From, State) ->
     go(NewState).
 
 format_response(State) ->
-    #state{
+    #st{
         timeout=MaxTimeout,
         last_response=Last
     } = State,
     case timer:now_diff(Last, os:timestamp()) of
         Diff when Diff >= MaxTimeout ->
-            NewState = State#state{
+            NewState = State#st{
                 from=undefined,
                 request=undefined,
                 timeout=undefined,
@@ -88,16 +88,16 @@ format_response(State) ->
             {noreply, State, 1000}
     end.
 
-go(#state{sock=undefined}=State) ->
-    #state{host=Host, port=Port} = State,
+go(#st{sock=undefined}=State) ->
+    #st{host=Host, port=Port} = State,
     case open_socket(Host, Port) of
         {ok, Sock} ->
-            go(State#state{sock=Sock});
+            go(State#st{sock=Sock});
         {error, _Reason} ->
             format_response(State)
     end;
 go(State) ->
-    #state{
+    #st{
         sock=Sock,
         request=Binary,
         timeout=Timeout
@@ -126,9 +126,9 @@ open_socket(Host, Port) ->
     gen_tcp:connect(Host, Port, SockOpts).
 
 accumulate(State, 0, Last) ->
-    #state{from=From} = State,
+    #st{from=From} = State,
     gen_server:reply(From, {done, Last}),
-    NewState = State#state{
+    NewState = State#st{
         from=undefined,
         request=undefined,
         timeout=undefined,
@@ -136,9 +136,9 @@ accumulate(State, 0, Last) ->
     },
     {ok, NewState};
 accumulate(State, Remaining, Last) ->
-    #state{from=From, sock=Sock, timeout=Timeout} = State,
+    #st{from=From, sock=Sock, timeout=Timeout} = State,
     gen_server:reply(From, {cont, Last}),
-    NewState = State#state{last_response=os:timestamp()},
+    NewState = State#st{last_response=os:timestamp()},
     case gen_tcp:recv(Sock, 0, Timeout) of
         {ok, Data} ->
             accumulate(NewState, Remaining-byte_size(Data), Data);
@@ -150,10 +150,10 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 handle_info(timeout, State) ->
-    #state{host=Host, port=Port} = State,
+    #st{host=Host, port=Port} = State,
     case open_socket(Host, Port) of
         {ok, Sock} ->
-            go(State#state{sock=Sock});
+            go(State#st{sock=Sock});
         {error, _Reason} ->
             {noreply, State, 1000}
     end.

@@ -18,7 +18,7 @@
     code_change/3
 ]).
 
--record(state, {
+-record(st, {
     clients,
     msgs,
     last_batch,
@@ -35,7 +35,7 @@ start_link(Host, Port) ->
     gen_server:start_link({local, name(Host, Port)}, ?MODULE, [Host, Port], []).
 
 init([Host, Port]) ->
-    State = #state{
+    State = #st{
         clients=dict:new(),
         last_batch=now(),
         msgs=dict:new(),
@@ -45,8 +45,8 @@ init([Host, Port]) ->
     {ok, State}.
 
 handle_call({msg, Topic, Partition, KVs}, From, State0) ->
-    #state{clients=Clients, msgs=Msgs} = State0,
-    State1 = State0#state{
+    #st{clients=Clients, msgs=Msgs} = State0,
+    State1 = State0#st{
         clients=dict:append({Topic, Partition}, From, Clients),
         msgs=dict:append_list({Topic, Partition}, KVs, Msgs)
     },
@@ -65,7 +65,7 @@ code_change(_OldVsn, State, _Extra) ->
     format_return(ok, State).
 
 format_return(Type, State) ->
-    #state{
+    #st{
         clients=Clients
     } = State,
     % is_empty isn't in r16
@@ -78,7 +78,7 @@ format_return(Type, State) ->
     end.
 
 maybe_make_request(State) ->
-    #state{last_batch=LastBatch, max_latency=MaxLatency} = State,
+    #st{last_batch=LastBatch, max_latency=MaxLatency} = State,
     case timer:now_diff(os:timestamp(), LastBatch)/1000 of
         Diff when Diff >= MaxLatency ->
             make_request(State);
@@ -87,7 +87,7 @@ maybe_make_request(State) ->
     end.
 
 make_request(State) ->
-    #state{
+    #st{
         clients=ClientDict,
         msgs=MsgDict,
         host=Host,
@@ -153,10 +153,10 @@ make_request(State) ->
         end, Clients)
     end, ClientDict),
 
-    State#state{clients=dict:new(), msgs=dict:new(), last_batch=now()}.
+    State#st{clients=dict:new(), msgs=dict:new(), last_batch=now()}.
 
 get_timeout(State) ->
-    #state{
+    #st{
         last_batch=LastBatch,
         max_latency=MaxLatency
     } = State,

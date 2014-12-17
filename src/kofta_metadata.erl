@@ -23,7 +23,7 @@
     name/2
 ]).
 
--record(state, {
+-record(st, {
     clients,
     last_batch,
     max_latency=100,
@@ -80,7 +80,7 @@ start_link(Host, Port) ->
     gen_fsm:start_link({local, name(Host, Port)}, ?MODULE, [Host, Port], []).
 
 init([Host, Port]) ->
-    State = #state{
+    State = #st{
         host=Host,
         port=Port,
         last_batch=now(),
@@ -108,7 +108,7 @@ reconnect(Host, Port) ->
     end.
 
 disconnected(timeout, State) ->
-    #state{host=Host, port=Port, reconnect_interval=Timeout} = State,
+    #st{host=Host, port=Port, reconnect_interval=Timeout} = State,
     case reconnect(Host, Port) of
         true ->
             kofta_cluster:activate_broker(Host, Port),
@@ -118,7 +118,7 @@ disconnected(timeout, State) ->
     end.
 
 disconnected(_Msg, _From, State) ->
-    #state{
+    #st{
         last_reconnect=LastReconnect,
         reconnect_interval=ReconnectInterval,
         host=Host,
@@ -137,15 +137,15 @@ disconnected(_Msg, _From, State) ->
             {disconnected, Timeout0}
     end,
 
-    NewState = State#state{last_reconnect=os:timestamp()},
+    NewState = State#st{last_reconnect=os:timestamp()},
     {reply, {error, broker_down}, NextState, NewState, Timeout}.
 
 ready(timeout, State) ->
     maybe_timeout(State).
 
 ready({lookup, Topic}, From, State0) ->
-    #state{clients=Clients} = State0,
-    State1 = State0#state{
+    #st{clients=Clients} = State0,
+    State1 = State0#st{
         clients=dict:append(Topic, From, Clients)
     },
     maybe_timeout(State1).
@@ -166,7 +166,7 @@ code_change(_OldVsn, StateName, State, _Extra) ->
     {ok, StateName, State}.
 
 maybe_timeout(State) ->
-    #state{
+    #st{
         clients=Clients,
         last_batch=LastBatch,
         max_latency=MaxLatency
@@ -185,7 +185,7 @@ maybe_timeout(State) ->
     end.
 
 make_request(State) ->
-    #state{
+    #st{
         clients=ClientDict,
         host=Host,
         port=Port,
@@ -194,7 +194,7 @@ make_request(State) ->
 
     TopicNames = dict:fetch_keys(ClientDict),
 
-    NewState = State#state{clients=dict:new(), last_batch=now()},
+    NewState = State#st{clients=dict:new(), last_batch=now()},
 
     case do_request(TopicNames, Host, Port) of
         {ok, Topics} ->
