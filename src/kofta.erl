@@ -14,7 +14,7 @@ start() ->
 stop() ->
     application:stop(kofta).
 
--spec metadata(binary()) -> {ok, [any()]} | {error, any()}.
+-spec metadata(binary()) -> {ok, [{error, any()} | {ok, integer(), {binary(), integer()}}]} | {error, any()}.
 metadata(TopicName) ->
     kofta_metadata:lookup(TopicName).
 

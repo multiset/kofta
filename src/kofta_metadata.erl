@@ -52,13 +52,18 @@ get_leader(TopicName, PartitionID) ->
             {ok, Leader};
         not_found ->
             case lookup(TopicName) of
-                {ok, Topic} ->
+                {ok, Partitions} ->
                     Partition = lists:keyfind(
                         PartitionID,
-                        #partition.id,
-                        Topic#topic.partitions
+                        2,
+                        Partitions
                     ),
-                    {ok, Partition#partition.leader};
+                    case Partition of
+                        {ok, _PartID, Leader} ->
+                            {ok, Leader};
+                        {error, _PartID, Reason} ->
+                            {error, Reason}
+                    end;
                 {error, Reason} ->
                     {error, Reason}
             end
@@ -71,7 +76,25 @@ lookup(TopicName) ->
             lists:map(fun(#partition{id=ID, leader=Leader}) ->
                 ets_lru:insert(kofta_leader_lru, {TopicName, ID}, Leader)
             end, Topic#topic.partitions),
-            {ok, Topic};
+            case Topic#topic.status of
+                ok ->
+                    Partitions = lists:map(fun(Partition) ->
+                        #partition{
+                            id=PartitionID,
+                            leader=Leader,
+                            status=Status
+                        } = Partition,
+                        case Status of
+                            ok ->
+                                {ok, PartitionID, Leader};
+                            Error ->
+                                {error, PartitionID, Error}
+                        end
+                    end, Topic#topic.partitions),
+                    {ok, Partitions};
+                Error ->
+                    {error, Error}
+            end;
         {error, Reason} ->
             {error, Reason}
     end.
