@@ -28,8 +28,12 @@
 }).
 
 send(Topic, Partition, KVs) ->
-    {ok, {Host, Port}} = kofta_metadata:get_leader(Topic, Partition),
-    gen_server:call(name(Host, Port), {msg, Topic, Partition, KVs}).
+    case kofta_metadata:get_leader(Topic, Partition) of
+        {ok, {Host, Port}} ->
+            gen_server:call(name(Host, Port), {msg, Topic, Partition, KVs});
+        {error, Reason} ->
+            {error, Reason}
+    end.
 
 start_link(Host, Port) ->
     gen_server:start_link({local, name(Host, Port)}, ?MODULE, [Host, Port], []).
