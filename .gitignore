@@ -3,3 +3,4 @@ ebin
 erl_crash.dump
 erln8.config
 src/.*.swp
+.eunit
