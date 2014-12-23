@@ -61,19 +61,31 @@ fetch(Topic, PartID, Options) ->
             Request = kofta_fetch:encode(
                 [{Topic, [{PartID, ReqOffset, MaxBytes}]}]
             ),
-            {ok, Response} = kofta_connection:request(Host, Port, Request),
-            {Decoded, _Rest} = kofta_fetch:decode(Response),
-            {_Header, Body} = Decoded,
-            [{_Topic, [{PartID, ErrorCode, _HWOffset, Messages}]}] = Body,
-            case kofta_util:error_to_atom(ErrorCode) of
-                ok ->
-                    Results = lists:map(fun(Msg) ->
-                        {Offset, _Size, _CRC, _Magic, _Att, Key, Value} = Msg,
-                        {Offset, Key, Value}
-                    end, Messages),
-                    {ok, Results};
-                Error ->
-                    {error, Error}
+            case kofta_connection:request(Host, Port, Request) of
+                {error, Reason} ->
+                    {error, Reason};
+                {ok, Response} ->
+                    {Decoded, _Rest} = kofta_fetch:decode(Response),
+                    {_Header, Body} = Decoded,
+                    [{_Topic, [{PartID, ErrorCode, _HWOff, Messages}]}] = Body,
+                    case kofta_util:error_to_atom(ErrorCode) of
+                        ok ->
+                            Results = lists:map(fun(Msg) ->
+                                {
+                                    Offset,
+                                    _Size,
+                                    _CRC,
+                                    _Magic,
+                                    _Att,
+                                    Key,
+                                    Value
+                                } = Msg,
+                                {Offset, Key, Value}
+                            end, Messages),
+                            {ok, Results};
+                        Error ->
+                            {error, Error}
+                    end
             end;
         {error, Reason} ->
             {error, Reason}
