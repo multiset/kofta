@@ -11,19 +11,35 @@
     message_set/2
 ]).
 
--spec string(binary()) -> {binary(), binary()}.
+
+-spec string(EncodedString) -> {DecodedString, Rest} when
+    EncodedString :: binary(),
+    DecodedString :: binary(),
+    Rest :: binary().
+
 string(Binary) ->
     <<Length:16/big-signed-integer, Rest0/binary>> = Binary,
     <<String:Length/binary, Rest1/binary>> = Rest0,
     {String, Rest1}.
 
--spec bytes(binary()) -> binary().
+
+-spec bytes(EncodedBytes) -> {DecodedBytes, Rest} when
+    EncodedBytes :: binary(),
+    DecodedBytes :: binary(),
+    Rest :: binary().
+
 bytes(Binary) ->
     <<Length:32/big-signed-integer, Rest0/binary>> = Binary,
     <<Bytes:Length/binary, Rest1/binary>> = Rest0,
     {Bytes, Rest1}.
 
--spec array(fun(), binary()) -> {any(), binary()}.
+
+-spec array(DecoderFun, ArrayBinary) -> {DecodedArray, Rest} when
+    DecoderFun :: fun(),
+    ArrayBinary :: binary(),
+    DecodedArray :: [any()],
+    Rest :: binary().
+
 array(DecodeElement, Binary) ->
     <<Length:32/big-signed-integer, Rest/binary>> = Binary,
     array_int(DecodeElement, Rest, Length, []).
@@ -34,11 +50,26 @@ array_int(DecodeElement, Binary, Count, Acc) ->
     {Element, Rest} = DecodeElement(Binary),
     array_int(DecodeElement, Rest, Count-1, [Element|Acc]).
 
+
+-spec request(EncodedRequest) -> {{RequestSize, CorrelationID}, Rest} when
+    EncodedRequest :: binary(),
+    RequestSize :: integer(),
+    CorrelationID :: integer(),
+    Rest :: binary().
+
 request(Message) ->
     <<Size:32/big-signed-integer,
       CorrelationID:32/big-signed-integer,
       Rest0/binary>> = Message,
     {{Size, CorrelationID}, Rest0}.
+
+
+-spec broker(EncodedBroker) -> {{NodeID, Host, Port}, Rest} when
+    EncodedBroker :: binary(),
+    NodeID :: integer(),
+    Host :: binary(),
+    Port :: integer(),
+    Rest :: binary().
 
 broker(Binary) ->
     <<NodeID:32/big-signed-integer, Rest/binary>> = Binary,
@@ -46,15 +77,47 @@ broker(Binary) ->
     <<Port:32/big-signed-integer, Rest2/binary>> = Rest1,
     {{NodeID, Host, Port}, Rest2}.
 
+
+-spec topic_metadata(EncodedMetadata) -> {{Error, Name, PartData}, Rest} when
+    EncodedMetadata :: binary(),
+    Error :: integer(),
+    Name :: binary(),
+    PartData :: [{
+        integer(),
+        integer(),
+        {binary(), integer()},
+        [integer()],
+        [integer()]
+    }],
+    Rest :: binary().
+
 topic_metadata(Binary) ->
     <<TopicErrorCode:16/big-signed-integer, Rest0/binary>> = Binary,
     {TopicName, Rest1} = string(Rest0),
     {PartitionMetadata, Rest2} = array(fun partition_metadata/1, Rest1),
     {{TopicErrorCode, TopicName, PartitionMetadata}, Rest2}.
 
+
+-spec int32(EncodedInt32) -> {Int32, Rest} when
+    EncodedInt32 :: binary(),
+    Int32 :: integer(),
+    Rest :: binary().
+
 int32(Binary) ->
     <<Int:32/big-signed-integer, Rest/binary>> = Binary,
     {Int, Rest}.
+
+
+-spec partition_metadata(EncodedPartData) -> {PartMetadata, Rest} when
+    EncodedPartData :: binary(),
+    PartMetadata :: {
+        integer(),
+        integer(),
+        {binary(), integer()},
+        [integer()],
+        [integer()]
+    },
+    Rest :: binary().
 
 partition_metadata(Binary) ->
     <<PartitionErrorCode:16/big-signed-integer,
@@ -64,6 +127,21 @@ partition_metadata(Binary) ->
     {Replicas, Rest1} = array(fun int32/1, Rest0),
     {Isr, Rest2} = array(fun int32/1, Rest1),
     {{PartitionErrorCode, PartitionID, Leader, Replicas, Isr}, Rest2}.
+
+
+-spec message_set(EncodedMessageSet, MessageSetSize) -> {Messages, Rest} when
+    EncodedMessageSet :: binary(),
+    MessageSetSize :: integer(),
+    Messages :: {
+        integer(),
+        integer(),
+        integer(),
+        integer(),
+        integer(),
+        binary() | null,
+        binary() | null
+    },
+    Rest :: binary().
 
 message_set(Binary, Size) ->
     message_set_int(Binary, Size, []).

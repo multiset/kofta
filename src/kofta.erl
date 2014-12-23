@@ -6,24 +6,50 @@
     fetch/3
 ]).
 
--export([start/0, stop/0]).
+-export([
+    start/0,
+    stop/0
+]).
+
 
 start() ->
+    application:start(poolboy),
     application:start(kofta).
 
+
 stop() ->
+    application:stop(poolboy),
     application:stop(kofta).
 
--spec metadata(binary()) -> {ok, [{error, any()} | {ok, integer(), {binary(), integer()}}]} | {error, any()}.
+
+-spec metadata(TopicName) -> {ok, [PartError | Result]} | Error when
+    TopicName :: binary(),
+    PartError :: {error, any()},
+    Result :: {ok, integer(), {binary(), integer()}},
+    Error :: {error, any()}.
+
 metadata(TopicName) ->
     kofta_metadata:lookup(TopicName).
 
--spec produce(binary(), [{binary(), binary()}], [any()]) -> ok | {error, any()}.
+
+-spec produce(TopicName, KVs, Options) -> ok | Error when
+    TopicName :: binary(),
+    KVs :: [{binary(), binary()}],
+    Options :: [any()],
+    Error :: {error, any()}.
+
 produce(Topic, KVs, Options) ->
     {partition, Partition} = lists:keyfind(partition, 1, Options),
     kofta_producer_batcher:send(Topic, Partition, KVs).
 
--spec fetch(binary(), integer(), [any()]) -> {ok, [binary()]} | {error, any()}.
+
+-spec fetch(TopicName, PartitionID, Options) -> {ok, Response} | Error when
+    TopicName :: binary(),
+    PartitionID :: integer(),
+    Options :: [any()],
+    Response :: [binary()],
+    Error :: {error, any()}.
+
 fetch(Topic, PartID, Options) ->
     {ok, {Host, Port}} = kofta_metadata:get_leader(Topic, PartID),
     Offset = proplists:get_value(offset, Options, 0),

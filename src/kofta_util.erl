@@ -2,6 +2,11 @@
 
 -export([error_to_atom/1]).
 
+
+-spec error_to_atom(ErrorID) -> ErrorName when
+    ErrorID :: integer(),
+    ErrorName :: atom().
+
 error_to_atom(ErrorID) ->
     case ErrorID of
         0 -> ok;

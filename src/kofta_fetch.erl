@@ -2,7 +2,14 @@
 
 -export([encode/1, decode/1]).
 
--spec encode([{binary(), [{integer(), integer(), integer()}]}]) -> iodata().
+
+-spec encode([{TopicName, [{PartitionID, Offset, MaxBytes}]}]) -> Response when
+    TopicName :: binary(),
+    PartitionID :: integer(),
+    Offset :: integer(),
+    MaxBytes :: integer(),
+    Response :: iodata().
+
 encode(Data) ->
     Header = <<
       -1:32/big-signed-integer,
@@ -17,6 +24,13 @@ encode(Data) ->
         [kofta_encode:string(Topic), Encoded]
     end, Data),
     kofta_encode:request(1, 0, 0, <<>>, [Header, Body]).
+
+
+-spec decode(Response) -> {{Headers, [Message]}, Rest} when
+    Response :: binary(),
+    Headers :: any(),
+    Message :: binary(),
+    Rest :: binary().
 
 decode(Binary0) ->
     {Request, Rest0} = kofta_decode:request(Binary0),

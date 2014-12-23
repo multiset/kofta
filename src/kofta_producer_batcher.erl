@@ -27,6 +27,15 @@
     port
 }).
 
+
+-spec send(TopicName, Partition, [{Key, Value}]) -> {ok, Offset} | Error when
+    TopicName :: binary(),
+    Partition :: integer(),
+    Key :: binary() | null,
+    Value :: binary() | null,
+    Offset :: integer(),
+    Error :: {error, any()}.
+
 send(Topic, Partition, KVs) ->
     case kofta_metadata:get_leader(Topic, Partition) of
         {ok, {Host, Port}} ->
@@ -35,8 +44,10 @@ send(Topic, Partition, KVs) ->
             {error, Reason}
     end.
 
+
 start_link(Host, Port) ->
     gen_server:start_link({local, name(Host, Port)}, ?MODULE, [Host, Port], []).
+
 
 init([Host, Port]) ->
     State = #st{
@@ -48,6 +59,7 @@ init([Host, Port]) ->
     },
     {ok, State}.
 
+
 handle_call({msg, Topic, Partition, KVs}, From, State0) ->
     #st{clients=Clients, msgs=Msgs} = State0,
     State1 = State0#st{
@@ -56,17 +68,27 @@ handle_call({msg, Topic, Partition, KVs}, From, State0) ->
     },
     format_return(noreply, State1).
 
+
 handle_cast(_Msg, State) ->
     format_return(noreply, State).
+
 
 handle_info(timeout, State) ->
     format_return(noreply, State).
 
+
 terminate(_Reason, _State) ->
     ok.
 
+
 code_change(_OldVsn, State, _Extra) ->
     format_return(ok, State).
+
+
+-spec format_return(Type, State) -> {Type, State} | {Type, State, Timeout} when
+    Type :: atom(),
+    State :: #st{},
+    Timeout :: integer().
 
 format_return(Type, State) ->
     #st{
@@ -81,6 +103,10 @@ format_return(Type, State) ->
             {Type, NewState, get_timeout(NewState)}
     end.
 
+
+-spec maybe_make_request(State) -> State when
+    State :: #st{}.
+
 maybe_make_request(State) ->
     #st{last_batch=LastBatch, max_latency=MaxLatency} = State,
     case timer:now_diff(os:timestamp(), LastBatch)/1000 of
@@ -89,6 +115,10 @@ maybe_make_request(State) ->
         _ ->
             State
     end.
+
+
+-spec make_request(State) -> State when
+    State :: #st{}.
 
 make_request(State) ->
     #st{
@@ -132,7 +162,7 @@ make_request(State) ->
     BinRequest = kofta_encode:request(0, 0, 0, <<>>, [Header,ProduceBinBody]),
 
     {ok, Response} = kofta_connection:request(Host, Port, BinRequest),
-    {Request, Rest0} = kofta_decode:request(Response),
+    {_Request, Rest0} = kofta_decode:request(Response),
     {Body, <<>>} = kofta_decode:array(fun(Binary0) ->
         {TopicName, IRest0} = kofta_decode:string(Binary0),
         {PartResps, IRest2} = kofta_decode:array(fun(Binary1) ->
@@ -146,8 +176,14 @@ make_request(State) ->
     end, Rest0),
 
     Responses = lists:foldl(fun({TopicName, PartInfo}, IntAcc) ->
-        lists:foldl(fun({PartID, _ErrCode, _Offset}, IntAcc1) ->
-            dict:store({TopicName, PartID}, {Request, Body}, IntAcc1)
+        lists:foldl(fun({PartID, ErrCode, Offset}, IntAcc1) ->
+            Resp = case kofta_util:error_to_atom(ErrCode) of
+                ok ->
+                    {ok, Offset};
+                Error ->
+                    {error, Error}
+            end,
+            dict:store({TopicName, PartID}, Resp, IntAcc1)
         end, IntAcc, PartInfo)
     end, dict:new(), Body),
 
@@ -158,6 +194,11 @@ make_request(State) ->
     end, ClientDict),
 
     State#st{clients=dict:new(), msgs=dict:new(), last_batch=now()}.
+
+
+-spec get_timeout(State) -> Timeout when
+    State :: #st{},
+    Timeout :: integer().
 
 get_timeout(State) ->
     #st{
@@ -172,6 +213,12 @@ get_timeout(State) ->
         Diff ->
             Diff/1000
     end.
+
+
+-spec name(Host, Port) -> Name when
+    Host :: binary(),
+    Port :: integer(),
+    Name :: atom().
 
 name(Host, Port) ->
     LHost = binary_to_list(Host),

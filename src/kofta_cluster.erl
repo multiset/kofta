@@ -3,17 +3,33 @@
 -export([
     activate_broker/2,
     deactivate_broker/2,
-    get_active_broker/0,
-    get_brokers/0
+    active_broker/0
 ]).
 
+
+-spec activate_broker(Host, Port) -> ok when
+    Host :: binary(),
+    Port :: integer().
+
 activate_broker(Host, Port) ->
-    ets:insert(active_brokers, {{Host, Port}}).
+    true = ets:insert(active_brokers, {{Host, Port}}),
+    ok.
+
+
+-spec deactivate_broker(Host, Port) -> ok when
+    Host :: binary(),
+    Port :: integer().
 
 deactivate_broker(Host, Port) ->
-    ets:delete(active_brokers, {Host, Port}).
+    true = ets:delete(active_brokers, {Host, Port}),
+    ok.
 
-get_active_broker() ->
+
+-spec active_broker() -> Error | {ok, Broker} when
+    Error :: {error, any()},
+    Broker :: {binary(), integer()}. % host, port
+
+active_broker() ->
     Tab = ets:tab2list(active_brokers),
     Size = length(Tab),
     case Size of
@@ -24,8 +40,3 @@ get_active_broker() ->
             {Broker} = lists:nth(RandomIndex, Tab),
             {ok, Broker}
     end.
-
--spec get_brokers() -> [{binary(), integer()}].
-get_brokers() ->
-    {ok, Brokers} = application:get_env(kofta, brokers),
-    [HP || {_, HP} <- lists:sort([{random:uniform(), HP} || HP <- Brokers])].

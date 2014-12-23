@@ -8,8 +8,10 @@
     name/2
 ]).
 
+
 start_link(Host, Port) ->
     supervisor:start_link({local, name(Host, Port)}, ?MODULE, [Host, Port]).
+
 
 init([Host, Port]) ->
     {ok, Size} = application:get_env(kofta, connection_pool_size),
@@ -32,6 +34,12 @@ init([Host, Port]) ->
             transient, 5000, worker, [kofta_producer_batcher]
         }
     ]}}.
+
+
+-spec name(Host, Port) -> Name when
+    Host :: binary(),
+    Port :: integer(),
+    Name :: atom().
 
 name(Host, Port) ->
     LHost = binary_to_list(Host),

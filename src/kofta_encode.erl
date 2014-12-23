@@ -3,50 +3,50 @@
 -export([
     string/1,
     bytes/1,
-    int8/1,
-    int16/1,
-    int32/1,
-    int64/1,
     array/2,
     request/5,
     message_set/1
 ]).
 
--spec string(binary()) -> binary().
+-spec string(ErlangBinary) -> EncodedString when
+    ErlangBinary :: binary(),
+    EncodedString :: binary().
+
 string(String) ->
     Length = byte_size(String),
     <<Length:16/big-signed-integer, String/binary>>.
 
--spec bytes(binary() | null) -> iolist().
+
+-spec bytes(ErlangBinary) -> EncodedBytes when
+    ErlangBinary :: binary() | null,
+    EncodedBytes :: binary().
+
 bytes(null) ->
     <<-1:32/big-signed-integer>>;
 bytes(Binary) ->
     Length = byte_size(Binary),
-    [<<Length:32/big-signed-integer>>, Binary].
+    <<Length:32/big-signed-integer, Binary/binary>>.
 
--spec int8(integer()) -> binary().
-int8(Int) ->
-    <<Int:8/big-signed-integer>>.
 
--spec int16(integer()) -> binary().
-int16(Int) ->
-    <<Int:16/big-signed-integer>>.
+-spec array(Encoder, ArrayToEncode) -> EncodedArray when
+    Encoder :: fun(),
+    ArrayToEncode :: [any()],
+    EncodedArray :: iodata().
 
--spec int32(integer()) -> binary().
-int32(Int) ->
-    <<Int:32/big-signed-integer>>.
-
--spec int64(integer()) -> binary().
-int64(Int) ->
-    <<Int:64/big-signed-integer>>.
-
--spec array(fun(), [any()]) -> iodata().
 array(EncodeElement, Array) ->
     Length = length(Array),
     Encoded = [EncodeElement(E) || E <- Array],
     [<<Length:32/big-signed-integer>>|Encoded].
 
--spec request(integer(), integer(), integer(), string(), iodata()) -> iodata().
+
+-spec request(APIKey, APIVersion, CorrelationID, ClientID, Msg) -> Response when
+    APIKey :: integer(),
+    APIVersion :: integer(),
+    CorrelationID :: integer(),
+    ClientID :: string(),
+    Msg :: iodata(),
+    Response :: iodata().
+
 request(APIKey, APIVersion, CorrelationID, ClientID, Message) ->
     ClientIDBin = string(ClientID),
     Size = iolist_size(Message) + 8 + byte_size(ClientIDBin),
@@ -57,7 +57,12 @@ request(APIKey, APIVersion, CorrelationID, ClientID, Message) ->
      ClientIDBin,
      Message].
 
--spec message_set([{binary() | null, binary() | null}]) -> iolist().
+
+-spec message_set([{Key, Value}]) -> MessageSet when
+    Key :: binary() | null,
+    Value :: binary() | null,
+    MessageSet :: iolist().
+
 message_set(KVs) ->
     lists:map(fun({Key, Value}) ->
         Body = iolist_to_binary([

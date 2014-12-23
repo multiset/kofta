@@ -23,6 +23,7 @@
     name/2
 ]).
 
+
 -record(st, {
     clients,
     last_batch,
@@ -34,17 +35,26 @@
     reconnect_interval=1000
 }).
 
+
 -record(topic, {
     name,
     partitions,
     status
 }).
 
+
 -record(partition, {
     id,
     leader,
     status
 }).
+
+
+-spec get_leader(TopicName, PartitionID) -> {ok, Leader} | Error when
+    TopicName :: binary(),
+    PartitionID :: integer(),
+    Leader :: {binary(), integer()},
+    Error :: {error, any()}.
 
 get_leader(TopicName, PartitionID) ->
     case ets_lru:lookup_d(kofta_leader_lru, {TopicName, PartitionID}) of
@@ -69,8 +79,15 @@ get_leader(TopicName, PartitionID) ->
             end
     end.
 
+
+-spec lookup(TopicName) -> {ok, [PartError | PartResponse]} | Error when
+    TopicName :: binary(),
+    PartResponse :: {ok, integer(), {binary(), integer()}},
+    PartError :: {error, integer(), any()},
+    Error :: {error, any()}.
+
 lookup(TopicName) ->
-    {ok, {Host, Port}} = kofta_cluster:get_active_broker(),
+    {ok, {Host, Port}} = kofta_cluster:active_broker(),
     case gen_fsm:sync_send_event(name(Host, Port), {lookup, TopicName}) of
         {ok, Topic} ->
             lists:map(fun(#partition{id=ID, leader=Leader}) ->
@@ -99,8 +116,10 @@ lookup(TopicName) ->
             {error, Reason}
     end.
 
+
 start_link(Host, Port) ->
     gen_fsm:start_link({local, name(Host, Port)}, ?MODULE, [Host, Port], []).
+
 
 init([Host, Port]) ->
     State = #st{
@@ -112,23 +131,6 @@ init([Host, Port]) ->
     },
     {ok, disconnected, State, 0}.
 
-do_request(TopicNames, Host, Port) ->
-    Data = encode(TopicNames),
-    case kofta_connection:request(Host, Port, Data) of
-        {ok, Response} ->
-            {ok, _Brokers, Topics} = decode(Response),
-            {ok, Topics};
-        {error, Reason} ->
-            {error, Reason}
-    end.
-
-reconnect(Host, Port) ->
-    case do_request([], Host, Port) of
-        {ok, _} ->
-            true;
-        {error, _Reason} ->
-            false
-    end.
 
 disconnected(timeout, State) ->
     #st{host=Host, port=Port, reconnect_interval=Timeout} = State,
@@ -140,6 +142,7 @@ disconnected(timeout, State) ->
             {next_state, disconnected, State, Timeout}
     end.
 
+
 disconnected(_Msg, _From, State) ->
     #st{
         last_reconnect=LastReconnect,
@@ -148,23 +151,27 @@ disconnected(_Msg, _From, State) ->
         port=Port
     } = State,
 
-    {NextState, Timeout} = case get_timeout(LastReconnect, ReconnectInterval) of
-        0 ->
+    NowDiff = timer:now_diff(os:timestamp(), LastReconnect)/1000,
+
+    {NextState, Timeout} = case round(ReconnectInterval - NowDiff) of
+        Delta when Delta < 0 ->
             case reconnect(Host, Port) of
                 true ->
                     {ready, 0};
                 false ->
                     {disconnected, ReconnectInterval}
             end;
-        Timeout0 ->
-            {disconnected, Timeout0}
+        NewTimeout ->
+            {disconnected, NewTimeout}
     end,
 
     NewState = State#st{last_reconnect=os:timestamp()},
     {reply, {error, broker_down}, NextState, NewState, Timeout}.
 
+
 ready(timeout, State) ->
     maybe_timeout(State).
+
 
 ready({lookup, Topic}, From, State0) ->
     #st{clients=Clients} = State0,
@@ -173,20 +180,46 @@ ready({lookup, Topic}, From, State0) ->
     },
     maybe_timeout(State1).
 
+
 handle_event(_Event, StateName, State) ->
     {next_state, StateName, State}.
+
 
 handle_sync_event(_Event, _From, StateName, State) ->
     {reply, ok, StateName, State}.
 
+
 handle_info(_Info, StateName, State) ->
     {next_state, StateName, State}.
+
 
 terminate(_Reason, _StateName, _State) ->
     ok.
 
+
 code_change(_OldVsn, StateName, State, _Extra) ->
     {ok, StateName, State}.
+
+
+reconnect(Host, Port) ->
+    case do_request([], Host, Port) of
+        {ok, _} ->
+            true;
+        {error, _Reason} ->
+            false
+    end.
+
+
+do_request(TopicNames, Host, Port) ->
+    Data = encode(TopicNames),
+    case kofta_connection:request(Host, Port, Data) of
+        {ok, Response} ->
+            {ok, _Brokers, Topics} = decode(Response),
+            {ok, Topics};
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
 
 maybe_timeout(State) ->
     #st{
@@ -194,18 +227,20 @@ maybe_timeout(State) ->
         last_batch=LastBatch,
         max_latency=MaxLatency
     } = State,
-    % is_empty isn't in r16
     case dict:size(Clients) of
         0 ->
             {next_state, ready, State};
         _ ->
-            case get_timeout(LastBatch, MaxLatency) of
-                0 ->
+            NowDiff = timer:now_diff(os:timestamp(), LastBatch)/1000,
+
+            case round(MaxLatency - NowDiff) of
+                Delta when Delta < 0 ->
                     make_request(State);
                 Timeout ->
                     {next_state, ready, State, Timeout}
             end
     end.
+
 
 make_request(State) ->
     #st{
@@ -241,16 +276,19 @@ make_request(State) ->
     end.
 
 
-get_timeout(Last, Max) ->
-    NowDiff = timer:now_diff(os:timestamp(), Last)/1000,
-    Timeout = Max - NowDiff,
-    max(0, round(Timeout)).
+-spec encode(TopicNames) -> EncodedRequest when
+    TopicNames :: [binary()],
+    EncodedRequest :: binary().
 
-
--spec encode([binary()]) -> binary().
 encode(Topics) ->
     Message = kofta_encode:array(fun kofta_encode:string/1, Topics),
     kofta_encode:request(3, 0, 0, <<"">>, Message).
+
+
+-spec decode(EncodedResponse) -> {ok, Brokers, Topics} when
+    EncodedResponse :: binary(),
+    Brokers :: [{binary(), integer()}],
+    Topics :: [#topic{}].
 
 decode(Binary) ->
     {_Request, Rest0} = kofta_decode:request(Binary),
@@ -274,5 +312,12 @@ decode(Binary) ->
     end, TopicMetadata),
     {ok, Brokers, Topics}.
 
+
+-spec name(Host, Port) -> Name when
+    Host :: binary(),
+    Port :: integer(),
+    Name :: atom().
+
 name(Host, Port) ->
-    list_to_atom("kofta_metadata_" ++ binary_to_list(Host) ++ "_" ++ integer_to_list(Port)).
+    LHost = binary_to_list(Host),
+    list_to_atom("kofta_metadata_" ++ LHost ++ "_" ++ integer_to_list(Port)).

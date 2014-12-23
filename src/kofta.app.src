@@ -1,18 +1,19 @@
-{application, kofta,
- [
-  {description, ""},
-  {vsn, "1"},
-  {registered, []},
-  {applications, [
-                  kernel,
-                  stdlib
-                 ]},
-  {mod, { kofta_app, []}},
-  {env, [
-    {brokers, [
-      {<<"localhost">>, 9092},
-      {<<"localhost">>, 9093},
-      {<<"localhost">>, 9094}]},
-    {connection_pool_size, 10}
-  ]}
- ]}.
+{application, kofta, [
+    {description, "A Kafka 0.8.x client"},
+    {vsn, "1"},
+    {registered, []},
+    {applications, [
+        kernel,
+        stdlib,
+        poolboy
+    ]},
+    {mod, {kofta_app, []}},
+    {env, [
+        {brokers, [
+            {<<"localhost">>, 9092},
+            {<<"localhost">>, 9093},
+            {<<"localhost">>, 9094}
+        ]},
+        {connection_pool_size, 10}
+    ]}
+]}.
