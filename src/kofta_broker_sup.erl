@@ -19,7 +19,8 @@ init([Host, Port]) ->
     PoolArgs = [
         {name, {local, PoolName}},
         {worker_module, kofta_connection},
-        {size, Size}
+        {size, Size},
+        {max_overflow, 0}
     ],
     {ok, {{one_for_one, 5, 10}, [
         poolboy:child_spec(PoolName, PoolArgs, [Host, Port]),
