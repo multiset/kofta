@@ -37,11 +37,13 @@
     Error :: {error, any()}.
 
 send(Topic, Partition, KVs) ->
-    case kofta_metadata:get_leader(Topic, Partition) of
+    try kofta_metadata:get_leader(Topic, Partition) of
         {ok, {Host, Port}} ->
             gen_server:call(name(Host, Port), {msg, Topic, Partition, KVs});
         {error, Reason} ->
             {error, Reason}
+    catch exit:Reason ->
+        {error, Reason}
     end.
 
 
@@ -92,30 +94,24 @@ code_change(_OldVsn, State, _Extra) ->
 
 format_return(Type, State) ->
     #st{
-        clients=Clients
+        clients=Clients,
+        last_batch=LastBatch,
+        max_latency=MaxLatency
     } = State,
+    HasWaiters = dict:size(Clients) > 0,
+    TimedOut = timer:now_diff(os:timestamp(), LastBatch) / 1000 >= MaxLatency,
     % is_empty isn't in r16
-    case dict:size(Clients) of
-        0 ->
+    case HasWaiters and TimedOut of
+        false ->
             {Type, State};
-        _ ->
-            NewState = maybe_make_request(State),
-            {Type, NewState, get_timeout(NewState)}
+        true ->
+            case make_request(State) of
+                {ok, NewState} ->
+                    {Type, NewState, get_timeout(NewState)};
+                {error, Reason, NewState} ->
+                    {stop, Reason, NewState}
+            end
     end.
-
-
--spec maybe_make_request(State) -> State when
-    State :: #st{}.
-
-maybe_make_request(State) ->
-    #st{last_batch=LastBatch, max_latency=MaxLatency} = State,
-    case timer:now_diff(os:timestamp(), LastBatch)/1000 of
-        Diff when Diff >= MaxLatency ->
-            make_request(State);
-        _ ->
-            State
-    end.
-
 
 -spec make_request(State) -> State when
     State :: #st{}.
@@ -161,39 +157,49 @@ make_request(State) ->
     Header = <<1:16/big-signed-integer, 10000:32/big-signed-integer>>,
     BinRequest = kofta_encode:request(0, 0, 0, <<>>, [Header,ProduceBinBody]),
 
-    {ok, Response} = kofta_connection:request(Host, Port, BinRequest),
-    {_Request, Rest0} = kofta_decode:request(Response),
-    {Body, <<>>} = kofta_decode:array(fun(Binary0) ->
-        {TopicName, IRest0} = kofta_decode:string(Binary0),
-        {PartResps, IRest2} = kofta_decode:array(fun(Binary1) ->
-            <<PartitionID:32/big-signed-integer,
-              ErrorCode:16/big-signed-integer,
-              Offset:64/big-signed-integer,
-              IRest1/binary>> = Binary1,
-            {{PartitionID, ErrorCode, Offset}, IRest1}
-        end, IRest0),
-        {{TopicName, PartResps}, IRest2}
-    end, Rest0),
+    case kofta_connection:request(Host, Port, BinRequest) of
+        {error, Error} ->
+            %% Die! Otherwise clients won't be able to guarantee exactly-once
+            %% delivery.
+            {error, Error, State};
+        {ok, Response} ->
+            {_Request, Rest0} = kofta_decode:request(Response),
+            {Body, <<>>} = kofta_decode:array(fun(Binary0) ->
+                {TopicName, IRest0} = kofta_decode:string(Binary0),
+                {PartResps, IRest2} = kofta_decode:array(fun(Binary1) ->
+                    <<PartitionID:32/big-signed-integer,
+                    ErrorCode:16/big-signed-integer,
+                    Offset:64/big-signed-integer,
+                    IRest1/binary>> = Binary1,
+                    {{PartitionID, ErrorCode, Offset}, IRest1}
+                end, IRest0),
+                {{TopicName, PartResps}, IRest2}
+            end, Rest0),
 
-    Responses = lists:foldl(fun({TopicName, PartInfo}, IntAcc) ->
-        lists:foldl(fun({PartID, ErrCode, Offset}, IntAcc1) ->
-            Resp = case kofta_util:error_to_atom(ErrCode) of
-                ok ->
-                    {ok, Offset};
-                Error ->
-                    {error, Error}
-            end,
-            dict:store({TopicName, PartID}, Resp, IntAcc1)
-        end, IntAcc, PartInfo)
-    end, dict:new(), Body),
+            Responses = lists:foldl(fun({TopicName, PartInfo}, IntAcc) ->
+                lists:foldl(fun({PartID, ErrCode, Offset}, IntAcc1) ->
+                    Resp = case kofta_util:error_to_atom(ErrCode) of
+                        ok ->
+                            {ok, Offset};
+                        Error ->
+                            {error, Error}
+                    end,
+                    dict:store({TopicName, PartID}, Resp, IntAcc1)
+                end, IntAcc, PartInfo)
+            end, dict:new(), Body),
 
-    dict:map(fun({Topic, Partition}, Clients) ->
-        lists:map(fun(Client) ->
-            gen_server:reply(Client, dict:fetch({Topic, Partition}, Responses))
-        end, Clients)
-    end, ClientDict),
+            dict:map(fun({Topic, Partition}, Clients) ->
+                lists:map(fun(Client) ->
+                    gen_server:reply(
+                        Client,
+                        dict:fetch({Topic, Partition},
+                        Responses
+                    ))
+                end, Clients)
+            end, ClientDict),
 
-    State#st{clients=dict:new(), msgs=dict:new(), last_batch=now()}.
+            State#st{clients=dict:new(), msgs=dict:new(), last_batch=now()}
+    end.
 
 
 -spec get_timeout(State) -> Timeout when
