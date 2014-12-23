@@ -43,17 +43,38 @@ produce(Topic, KVs, Options) ->
     kofta_producer_batcher:send(Topic, Partition, KVs).
 
 
--spec fetch(TopicName, PartitionID, Options) -> {ok, Response} | Error when
+-spec fetch(TopicName, PartitionID, Options) -> {ok, [Message]} | Error when
     TopicName :: binary(),
     PartitionID :: integer(),
     Options :: [any()],
-    Response :: [binary()],
+    Message :: [{Offset, Key, Value}],
+    Key :: binary() | null,
+    Value :: binary() | null,
+    Offset :: integer(),
     Error :: {error, any()}.
 
 fetch(Topic, PartID, Options) ->
-    {ok, {Host, Port}} = kofta_metadata:get_leader(Topic, PartID),
-    Offset = proplists:get_value(offset, Options, 0),
-    MaxBytes = proplists:get_value(max_bytes, Options, 10000),
-    Message = kofta_fetch:encode([{Topic, [{PartID, Offset, MaxBytes}]}]),
-    {ok, Response} = kofta_connection:request(Host, Port, Message),
-    kofta_fetch:decode(Response).
+    case kofta_metadata:get_leader(Topic, PartID) of
+        {ok, {Host, Port}} ->
+            ReqOffset = proplists:get_value(offset, Options, 0),
+            MaxBytes = proplists:get_value(max_bytes, Options, 10000),
+            Request = kofta_fetch:encode(
+                [{Topic, [{PartID, ReqOffset, MaxBytes}]}]
+            ),
+            {ok, Response} = kofta_connection:request(Host, Port, Request),
+            {Decoded, _Rest} = kofta_fetch:decode(Response),
+            {_Header, Body} = Decoded,
+            [{_Topic, [{PartID, ErrorCode, _HWOffset, Messages}]}] = Body,
+            case kofta_util:error_to_atom(ErrorCode) of
+                ok ->
+                    Results = lists:map(fun(Msg) ->
+                        {Offset, _Size, _CRC, _Magic, _Att, Key, Value} = Msg,
+                        {Offset, Key, Value}
+                    end, Messages),
+                    {ok, Results};
+                Error ->
+                    {error, Error}
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end.
