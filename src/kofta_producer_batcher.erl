@@ -22,7 +22,7 @@
     clients,
     msgs,
     last_batch,
-    max_latency=100,
+    max_latency,
     host,
     port
 }).
@@ -39,7 +39,11 @@
 send(Topic, Partition, KVs) ->
     try kofta_metadata:get_leader(Topic, Partition) of
         {ok, {Host, Port}} ->
-            gen_server:call(name(Host, Port), {msg, Topic, Partition, KVs});
+            gen_server:call(
+                name(Host, Port),
+                {msg, Topic, Partition, KVs},
+                call_timeout()
+            );
         {error, Reason} ->
             {error, Reason}
     catch exit:Reason ->
@@ -52,10 +56,12 @@ start_link(Host, Port) ->
 
 
 init([Host, Port]) ->
+    {ok, BatchLatency} = application:get_env(kofta, batch_latency),
     State = #st{
         clients=dict:new(),
         last_batch=now(),
         msgs=dict:new(),
+        max_latency=BatchLatency,
         host=Host,
         port=Port
     },
@@ -113,8 +119,9 @@ format_return(Type, State) ->
             end
     end.
 
--spec make_request(State) -> State when
-    State :: #st{}.
+-spec make_request(State) -> {ok, State} | {error, Reason, State} when
+    State :: #st{},
+    Reason :: any().
 
 make_request(State) ->
     #st{
@@ -156,8 +163,8 @@ make_request(State) ->
     end, RequestData),
     Header = <<1:16/big-signed-integer, 10000:32/big-signed-integer>>,
     BinRequest = kofta_encode:request(0, 0, 0, <<>>, [Header,ProduceBinBody]),
-
-    case kofta_connection:request(Host, Port, BinRequest) of
+    {ok, RequestTimeout} = application:get_env(kofta, request_timeout),
+    case kofta_connection:request(Host, Port, BinRequest, RequestTimeout) of
         {error, Error} ->
             %% Die! Otherwise clients won't be able to guarantee exactly-once
             %% delivery.
@@ -198,7 +205,12 @@ make_request(State) ->
                 end, Clients)
             end, ClientDict),
 
-            State#st{clients=dict:new(), msgs=dict:new(), last_batch=now()}
+            NewState = State#st{
+                clients=dict:new(),
+                msgs=dict:new(),
+                last_batch=now()
+            },
+            {ok, NewState}
     end.
 
 
@@ -230,3 +242,10 @@ name(Host, Port) ->
     LHost = binary_to_list(Host),
     LPort = integer_to_list(Port),
     list_to_atom("kofta_producer_batcher_" ++ LHost ++ "_" ++ LPort).
+
+call_timeout() ->
+    %% Need to ~guarantee that gen_server:call requests to the
+    %% producer_batcher don't time out before internal requests do.
+    {ok, ReqTimeout} = application:get_env(kofta, request_timeout),
+    {ok, BatchLatency} = application:get_env(kofta, batch_latency),
+    ReqTimeout + BatchLatency * 2.

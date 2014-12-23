@@ -14,6 +14,8 @@
             {<<"localhost">>, 9093},
             {<<"localhost">>, 9094}
         ]},
-        {connection_pool_size, 10}
+        {connection_pool_size, 10},
+        {request_timeout, 1000},
+        {batch_latency, 100}
     ]}
 ]}.
