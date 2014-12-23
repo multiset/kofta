@@ -69,6 +69,8 @@ get_leader(TopicName, PartitionID) ->
                         Partitions
                     ),
                     case Partition of
+                        false ->
+                            {error, bad_partition};
                         {ok, _PartID, Leader} ->
                             {ok, Leader};
                         {error, _PartID, Reason} ->
