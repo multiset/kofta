@@ -22,17 +22,24 @@ string(Binary) ->
     <<String:Length/binary, Rest1/binary>> = Rest0,
     {String, Rest1}.
 
-
--spec bytes(EncodedBytes) -> {DecodedBytes, Rest} when
+-spec bytes(EncodedBytes) -> {DecodedBytes, Rest} | undefined when
     EncodedBytes :: binary(),
-    DecodedBytes :: binary(),
+    DecodedBytes :: binary() | null,
     Rest :: binary().
 
+bytes(Binary) when bit_size(Binary) < 32 ->
+    undefined;
 bytes(Binary) ->
     <<Length:32/big-signed-integer, Rest0/binary>> = Binary,
-    <<Bytes:Length/binary, Rest1/binary>> = Rest0,
-    {Bytes, Rest1}.
-
+    case Length of
+        -1 ->
+            {null, Rest0};
+        _ when bit_size(Rest0) < Length * 8 ->
+            undefined;
+        _ ->
+            <<Bytes:Length/binary, Rest1/binary>> = Rest0,
+            {Bytes, Rest1}
+    end.
 
 -spec array(DecoderFun, ArrayBinary) -> {DecodedArray, Rest} when
     DecoderFun :: fun(),
@@ -143,41 +150,50 @@ partition_metadata(Binary) ->
     },
     Rest :: binary().
 
+message_set(Binary, Size) when bit_size(Binary) < (Size * 8) ->
+    {undefined, <<>>};
 message_set(Binary, Size) ->
-    message_set_int(Binary, Size, []).
+    <<MSBin:Size/binary, Rest0/binary>> = Binary,
+    {ParsedMS, Rest1} = message_set_int(MSBin, []),
+    case Rest1 of
+        <<>> ->
+            ok;
+        _ ->
+            %% TODO: log
+            ok
+    end,
+    {ParsedMS, Rest0}.
 
-message_set_int(Binary, 0, Acc) ->
+message_set_int(<<>>=Binary, Acc) ->
     {lists:reverse(Acc), Binary};
-message_set_int(Binary, RestCount, Acc0) ->
+message_set_int(Binary, Acc) when bit_size(Binary) < 144 ->
+    {lists:reverse(Acc), Binary};
+message_set_int(Binary, Acc0) ->
     <<Offset:64/big-signed-integer,
       MessageSize:32/big-signed-integer,
       Crc:32/big-signed-integer,
       MagicByte:8/big-signed-integer,
       Attributes:8/big-signed-integer,
-      KeyLen:32/big-signed-integer,
       Rest0/binary>> = Binary,
-
-    {Key, SizeCount0, ValueLen, Rest2} = case KeyLen of
-        -1 ->
-            <<ValueLen0:32/big-signed-integer,
-              Rest1/binary>> = Rest0,
-            % Obviously 26
-            {null, 26, ValueLen0, Rest1};
-        _ ->
-            <<Key0:KeyLen/binary,
-              ValueLen0:32/big-signed-integer,
-              Rest1/binary>> = Rest0,
-            {Key0, 26+KeyLen, ValueLen0, Rest1}
-    end,
-
-    {Value, SizeCount1, Rest4} = case ValueLen of
-        -1 ->
-            {null, SizeCount0, Rest2};
-        _ ->
-            <<Value0:ValueLen/binary, Rest3/binary>> = Rest2,
-            {Value0, SizeCount0+ValueLen, Rest3}
-    end,
-
-    Acc1 = [{Offset, MessageSize, Crc, MagicByte, Attributes, Key, Value}|Acc0],
-    message_set_int(Rest4, RestCount-SizeCount1, Acc1).
-
+    case bytes(Rest0) of
+        undefined ->
+            %% This message is truncated - bail.
+            {lists:reverse(Acc0), Binary};
+        {Key, Rest1} ->
+            case bytes(Rest1) of
+                undefined ->
+                    %% This message is truncated - bail.
+                    {lists:reverse(Acc0), Binary};
+                {Value, Rest2} ->
+                    Message = {
+                        Offset,
+                        MessageSize,
+                        Crc,
+                        MagicByte,
+                        Attributes,
+                        Key,
+                        Value
+                    },
+                    message_set_int(Rest2, [Message|Acc0])
+            end
+    end.
