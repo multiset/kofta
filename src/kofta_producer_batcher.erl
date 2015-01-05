@@ -22,7 +22,7 @@
     clients,
     msgs,
     last_batch,
-    max_latency=100,
+    max_latency,
     host,
     port
 }).
@@ -37,11 +37,17 @@
     Error :: {error, any()}.
 
 send(Topic, Partition, KVs) ->
-    case kofta_metadata:get_leader(Topic, Partition) of
+    try kofta_metadata:get_leader(Topic, Partition) of
         {ok, {Host, Port}} ->
-            gen_server:call(name(Host, Port), {msg, Topic, Partition, KVs});
+            gen_server:call(
+                name(Host, Port),
+                {msg, Topic, Partition, KVs},
+                call_timeout()
+            );
         {error, Reason} ->
             {error, Reason}
+    catch exit:Reason ->
+        {error, Reason}
     end.
 
 
@@ -50,10 +56,12 @@ start_link(Host, Port) ->
 
 
 init([Host, Port]) ->
+    {ok, BatchLatency} = application:get_env(kofta, batch_latency),
     State = #st{
         clients=dict:new(),
         last_batch=now(),
         msgs=dict:new(),
+        max_latency=BatchLatency,
         host=Host,
         port=Port
     },
@@ -92,33 +100,28 @@ code_change(_OldVsn, State, _Extra) ->
 
 format_return(Type, State) ->
     #st{
-        clients=Clients
+        clients=Clients,
+        last_batch=LastBatch,
+        max_latency=MaxLatency
     } = State,
+    HasWaiters = dict:size(Clients) > 0,
+    TimedOut = timer:now_diff(os:timestamp(), LastBatch) / 1000 >= MaxLatency,
     % is_empty isn't in r16
-    case dict:size(Clients) of
-        0 ->
+    case HasWaiters and TimedOut of
+        false ->
             {Type, State};
-        _ ->
-            NewState = maybe_make_request(State),
-            {Type, NewState, get_timeout(NewState)}
+        true ->
+            case make_request(State) of
+                {ok, NewState} ->
+                    {Type, NewState, get_timeout(NewState)};
+                {error, Reason, NewState} ->
+                    {stop, Reason, NewState}
+            end
     end.
 
-
--spec maybe_make_request(State) -> State when
-    State :: #st{}.
-
-maybe_make_request(State) ->
-    #st{last_batch=LastBatch, max_latency=MaxLatency} = State,
-    case timer:now_diff(os:timestamp(), LastBatch)/1000 of
-        Diff when Diff >= MaxLatency ->
-            make_request(State);
-        _ ->
-            State
-    end.
-
-
--spec make_request(State) -> State when
-    State :: #st{}.
+-spec make_request(State) -> {ok, State} | {error, Reason, State} when
+    State :: #st{},
+    Reason :: any().
 
 make_request(State) ->
     #st{
@@ -160,40 +163,55 @@ make_request(State) ->
     end, RequestData),
     Header = <<1:16/big-signed-integer, 10000:32/big-signed-integer>>,
     BinRequest = kofta_encode:request(0, 0, 0, <<>>, [Header,ProduceBinBody]),
+    {ok, RequestTimeout} = application:get_env(kofta, request_timeout),
+    case kofta_connection:request(Host, Port, BinRequest, RequestTimeout) of
+        {error, Error} ->
+            %% Die! Otherwise clients won't be able to guarantee exactly-once
+            %% delivery.
+            {error, Error, State};
+        {ok, Response} ->
+            {_Request, Rest0} = kofta_decode:request(Response),
+            {Body, <<>>} = kofta_decode:array(fun(Binary0) ->
+                {TopicName, IRest0} = kofta_decode:string(Binary0),
+                {PartResps, IRest2} = kofta_decode:array(fun(Binary1) ->
+                    <<PartitionID:32/big-signed-integer,
+                    ErrorCode:16/big-signed-integer,
+                    Offset:64/big-signed-integer,
+                    IRest1/binary>> = Binary1,
+                    {{PartitionID, ErrorCode, Offset}, IRest1}
+                end, IRest0),
+                {{TopicName, PartResps}, IRest2}
+            end, Rest0),
 
-    {ok, Response} = kofta_connection:request(Host, Port, BinRequest),
-    {_Request, Rest0} = kofta_decode:request(Response),
-    {Body, <<>>} = kofta_decode:array(fun(Binary0) ->
-        {TopicName, IRest0} = kofta_decode:string(Binary0),
-        {PartResps, IRest2} = kofta_decode:array(fun(Binary1) ->
-            <<PartitionID:32/big-signed-integer,
-              ErrorCode:16/big-signed-integer,
-              Offset:64/big-signed-integer,
-              IRest1/binary>> = Binary1,
-            {{PartitionID, ErrorCode, Offset}, IRest1}
-        end, IRest0),
-        {{TopicName, PartResps}, IRest2}
-    end, Rest0),
+            Responses = lists:foldl(fun({TopicName, PartInfo}, IntAcc) ->
+                lists:foldl(fun({PartID, ErrCode, Offset}, IntAcc1) ->
+                    Resp = case kofta_util:error_to_atom(ErrCode) of
+                        ok ->
+                            {ok, Offset};
+                        Error ->
+                            {error, Error}
+                    end,
+                    dict:store({TopicName, PartID}, Resp, IntAcc1)
+                end, IntAcc, PartInfo)
+            end, dict:new(), Body),
 
-    Responses = lists:foldl(fun({TopicName, PartInfo}, IntAcc) ->
-        lists:foldl(fun({PartID, ErrCode, Offset}, IntAcc1) ->
-            Resp = case kofta_util:error_to_atom(ErrCode) of
-                ok ->
-                    {ok, Offset};
-                Error ->
-                    {error, Error}
-            end,
-            dict:store({TopicName, PartID}, Resp, IntAcc1)
-        end, IntAcc, PartInfo)
-    end, dict:new(), Body),
+            dict:map(fun({Topic, Partition}, Clients) ->
+                lists:map(fun(Client) ->
+                    gen_server:reply(
+                        Client,
+                        dict:fetch({Topic, Partition},
+                        Responses
+                    ))
+                end, Clients)
+            end, ClientDict),
 
-    dict:map(fun({Topic, Partition}, Clients) ->
-        lists:map(fun(Client) ->
-            gen_server:reply(Client, dict:fetch({Topic, Partition}, Responses))
-        end, Clients)
-    end, ClientDict),
-
-    State#st{clients=dict:new(), msgs=dict:new(), last_batch=now()}.
+            NewState = State#st{
+                clients=dict:new(),
+                msgs=dict:new(),
+                last_batch=now()
+            },
+            {ok, NewState}
+    end.
 
 
 -spec get_timeout(State) -> Timeout when
@@ -224,3 +242,10 @@ name(Host, Port) ->
     LHost = binary_to_list(Host),
     LPort = integer_to_list(Port),
     list_to_atom("kofta_producer_batcher_" ++ LHost ++ "_" ++ LPort).
+
+call_timeout() ->
+    %% Need to ~guarantee that gen_server:call requests to the
+    %% producer_batcher don't time out before internal requests do.
+    {ok, ReqTimeout} = application:get_env(kofta, request_timeout),
+    {ok, BatchLatency} = application:get_env(kofta, batch_latency),
+    ReqTimeout + BatchLatency * 2.

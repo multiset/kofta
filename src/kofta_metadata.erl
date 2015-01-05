@@ -69,6 +69,8 @@ get_leader(TopicName, PartitionID) ->
                         Partitions
                     ),
                     case Partition of
+                        false ->
+                            {error, bad_partition};
                         {ok, _PartID, Leader} ->
                             {ok, Leader};
                         {error, _PartID, Reason} ->
@@ -259,7 +261,7 @@ make_request(State) ->
             lists:map(fun(Topic) ->
                 Clients = dict:fetch(Topic#topic.name, ClientDict),
                 lists:map(fun(Client) ->
-                    gen_server:reply(Client, {ok, Topic})
+                    gen_fsm:reply(Client, {ok, Topic})
                 end, Clients)
             end, Topics),
             {next_state, ready, NewState};
@@ -268,7 +270,7 @@ make_request(State) ->
             lists:map(fun(TopicName) ->
                 Clients = dict:fetch(TopicName, ClientDict),
                 lists:map(fun(Client) ->
-                    gen_server:reply(Client, {error, Reason})
+                    gen_fsm:reply(Client, {error, Reason})
                 end, Clients)
             end, TopicNames),
 

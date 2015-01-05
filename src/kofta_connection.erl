@@ -48,15 +48,47 @@ request(Host, Port, Msg) ->
     Port :: integer(),
     Msg :: binary(),
     Timeout :: integer(),
-    Response :: any().
+    Response :: any() | {error, atom()}.
 
 request(Host, Port, Msg, Timeout) ->
     PoolName = kofta_connection:name(Host, Port),
-    poolboy:transaction(PoolName, fun(Worker) ->
-        Ref = make_ref(),
-        Worker ! {'$gen_call', {self(), Ref}, {req, Msg, Timeout}},
-        accumulate_response(Ref, <<>>, Timeout)
-    end).
+    transact(
+        PoolName,
+        fun(Worker, WorkerTimeout) ->
+            Ref = make_ref(),
+            Worker ! {'$gen_call', {self(), Ref}, {req, Msg, WorkerTimeout}},
+            accumulate_response(Ref, <<>>, WorkerTimeout)
+        end,
+        50,
+        Timeout
+    ).
+
+-spec transact(Pool, Fun, Backoff, Timeout) -> Response when
+    Pool :: atom(),
+    Fun :: fun((pid(), pos_integer()) -> FunResponse),
+    Backoff :: pos_integer(),
+    Timeout :: non_neg_integer(),
+    FunResponse :: any(),
+    Response :: FunResponse | {error, timeout}.
+
+transact(Pool, Fun, Backoff, Timeout) when Timeout > 0 ->
+    try poolboy:checkout(Pool, false, Timeout) of
+        full ->
+            timer:sleep(min(Backoff, Timeout)),
+            transact(Pool, Fun, Backoff * 2, Timeout - Backoff);
+        Worker ->
+            try
+                Fun(Worker, Timeout)
+            catch exit:{timeout, _} ->
+                {error, timeout}
+            after
+                ok = poolboy:checkin(Pool, Worker)
+            end
+    catch exit:{timeout, _} ->
+        {error, timeout}
+    end;
+transact(_, _, _, _) ->
+    {error, timeout}.
 
 
 -spec accumulate_response(Ref, Acc, Timeout) -> {ok, Response} | Error when
