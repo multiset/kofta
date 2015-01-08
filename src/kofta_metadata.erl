@@ -19,6 +19,7 @@
 
 -export([
     lookup/1,
+    get_broker/1,
     get_leader/2,
     name/2
 ]).
@@ -26,6 +27,7 @@
 
 -record(st, {
     clients,
+    broker_clients,
     last_batch,
     max_latency=100,
     host,
@@ -82,6 +84,17 @@ get_leader(TopicName, PartitionID) ->
     end.
 
 
+-spec get_broker(BrokerID) -> {ok, {Host, Port}} | {error, Error} when
+    BrokerID :: integer(),
+    Host :: binary(),
+    Port :: integer(),
+    Error :: any().
+
+get_broker(BrokerID) ->
+    {ok, {Host, Port}} = kofta_cluster:active_broker(),
+    gen_fsm:sync_send_event(name(Host, Port), {broker, BrokerID}).
+
+
 -spec lookup(TopicName) -> {ok, [PartError | PartResponse]} | Error when
     TopicName :: binary(),
     PartResponse :: {ok, integer(), {binary(), integer()}},
@@ -129,7 +142,8 @@ init([Host, Port]) ->
         port=Port,
         last_batch=now(),
         last_reconnect=now(),
-        clients=dict:new()
+        clients=dict:new(),
+        broker_clients=dict:new()
     },
     {ok, disconnected, State, 0}.
 
@@ -180,6 +194,13 @@ ready({lookup, Topic}, From, State0) ->
     State1 = State0#st{
         clients=dict:append(Topic, From, Clients)
     },
+    maybe_timeout(State1);
+
+ready({broker, BrokerID}, From, State0) ->
+    #st{broker_clients=Clients} = State0,
+    State1 = State0#st{
+        broker_clients=dict:append(BrokerID, From, Clients)
+    },
     maybe_timeout(State1).
 
 
@@ -205,7 +226,7 @@ code_change(_OldVsn, StateName, State, _Extra) ->
 
 reconnect(Host, Port) ->
     case do_request([], Host, Port) of
-        {ok, _} ->
+        {ok, _Brokers, _Topics} ->
             true;
         {error, _Reason} ->
             false
@@ -216,8 +237,7 @@ do_request(TopicNames, Host, Port) ->
     Data = encode(TopicNames),
     case kofta_connection:request(Host, Port, Data) of
         {ok, Response} ->
-            {ok, _Brokers, Topics} = decode(Response),
-            {ok, Topics};
+            decode(Response);
         {error, Reason} ->
             {error, Reason}
     end.
@@ -226,13 +246,14 @@ do_request(TopicNames, Host, Port) ->
 maybe_timeout(State) ->
     #st{
         clients=Clients,
+        broker_clients=BClients,
         last_batch=LastBatch,
         max_latency=MaxLatency
     } = State,
-    case dict:size(Clients) of
-        0 ->
+    case dict:size(Clients) =:= 0 andalso dict:size(BClients) =:= 0 of
+        true ->
             {next_state, ready, State};
-        _ ->
+        false ->
             NowDiff = timer:now_diff(os:timestamp(), LastBatch)/1000,
 
             case round(MaxLatency - NowDiff) of
@@ -247,6 +268,7 @@ maybe_timeout(State) ->
 make_request(State) ->
     #st{
         clients=ClientDict,
+        broker_clients=BrokerClientDict,
         host=Host,
         port=Port,
         reconnect_interval=Timeout
@@ -254,16 +276,39 @@ make_request(State) ->
 
     TopicNames = dict:fetch_keys(ClientDict),
 
-    NewState = State#st{clients=dict:new(), last_batch=now()},
+    NewState = State#st{
+        clients=dict:new(),
+        broker_clients=dict:new(),
+        last_batch=now()
+    },
 
     case do_request(TopicNames, Host, Port) of
-        {ok, Topics} ->
-            lists:map(fun(Topic) ->
-                Clients = dict:fetch(Topic#topic.name, ClientDict),
-                lists:map(fun(Client) ->
-                    gen_fsm:reply(Client, {ok, Topic})
-                end, Clients)
-            end, Topics),
+        {ok, Brokers, Topics} ->
+            % If no topics are supplied in a metadata request, kafka returns
+            % all topics. Otherwise, there should be at least one client
+            % waiting for a response for each topic returned by kafka.
+            case dict:size(ClientDict) of
+                0 ->
+                    ok;
+                _ ->
+                    lists:foreach(fun(Topic) ->
+                        Clients = dict:fetch(Topic#topic.name, ClientDict),
+                        lists:map(fun(Client) ->
+                            gen_fsm:reply(Client, {ok, Topic})
+                        end, Clients)
+                    end, Topics)
+            end,
+
+            lists:map(fun({BrokerID, BrokerHost, BrokerPort}) ->
+                case dict:find(BrokerID, BrokerClientDict) of
+                    {ok, Clients} ->
+                        lists:foreach(fun(Client) ->
+                            gen_fsm:reply(Client, {ok, {BrokerHost, BrokerPort}})
+                        end, Clients);
+                    error ->
+                        ok
+                end
+            end, Brokers),
             {next_state, ready, NewState};
         {error, Reason} ->
             kofta_cluster:deactivate_broker(Host, Port),
@@ -273,6 +318,12 @@ make_request(State) ->
                     gen_fsm:reply(Client, {error, Reason})
                 end, Clients)
             end, TopicNames),
+
+            dict:map(fun(_BrokerID, Clients) ->
+                lists:foreach(fun(Client) ->
+                    gen_fsm:reply(Client, {error, Reason})
+                end, Clients)
+            end, BrokerClientDict),
 
             {next_state, disconnected, NewState, Timeout}
     end.

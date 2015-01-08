@@ -3,6 +3,7 @@
 -export([
     activate_broker/2,
     deactivate_broker/2,
+    active_brokers/0,
     active_broker/0
 ]).
 
@@ -30,7 +31,7 @@ deactivate_broker(Host, Port) ->
     Broker :: {binary(), integer()}. % host, port
 
 active_broker() ->
-    Tab = ets:tab2list(active_brokers),
+    Tab = active_brokers(),
     Size = length(Tab),
     case Size of
         0 ->
@@ -40,3 +41,10 @@ active_broker() ->
             {Broker} = lists:nth(RandomIndex, Tab),
             {ok, Broker}
     end.
+
+
+-spec active_brokers() -> [Broker] when
+    Broker :: {binary(), integer()}. % host, port
+
+active_brokers() ->
+    ets:tab2list(active_brokers).

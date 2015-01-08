@@ -74,15 +74,15 @@ handle_call({msg, Topic, Partition, KVs}, From, State0) ->
         clients=dict:append({Topic, Partition}, From, Clients),
         msgs=dict:append_list({Topic, Partition}, KVs, Msgs)
     },
-    format_return(noreply, State1).
+    format_return(State1).
 
 
 handle_cast(_Msg, State) ->
-    format_return(noreply, State).
+    format_return(State).
 
 
 handle_info(timeout, State) ->
-    format_return(noreply, State).
+    format_return(State).
 
 
 terminate(_Reason, _State) ->
@@ -90,15 +90,14 @@ terminate(_Reason, _State) ->
 
 
 code_change(_OldVsn, State, _Extra) ->
-    format_return(ok, State).
+    {ok, State}.
 
 
--spec format_return(Type, State) -> {Type, State} | {Type, State, Timeout} when
-    Type :: atom(),
+-spec format_return(State) -> {noreply, State} | {noreply, State, Timeout} when
     State :: #st{},
     Timeout :: integer().
 
-format_return(Type, State) ->
+format_return(State) ->
     #st{
         clients=Clients,
         last_batch=LastBatch,
@@ -107,15 +106,20 @@ format_return(Type, State) ->
     HasWaiters = dict:size(Clients) > 0,
     TimedOut = timer:now_diff(os:timestamp(), LastBatch) / 1000 >= MaxLatency,
     % is_empty isn't in r16
-    case HasWaiters and TimedOut of
+    case HasWaiters of
         false ->
-            {Type, State};
+            {noreply, State};
         true ->
-            case make_request(State) of
-                {ok, NewState} ->
-                    {Type, NewState, get_timeout(NewState)};
-                {error, Reason, NewState} ->
-                    {stop, Reason, NewState}
+            case TimedOut of
+                true ->
+                    case make_request(State) of
+                        {ok, NewState} ->
+                            {noreply, NewState, get_timeout(NewState)};
+                        {error, Reason, NewState} ->
+                            {stop, Reason, NewState}
+                    end;
+                false ->
+                    {noreply, State, get_timeout(State)}
             end
     end.
 
@@ -229,7 +233,7 @@ get_timeout(State) ->
         Diff when Diff < 0 ->
             0;
         Diff ->
-            Diff/1000
+            round(Diff/1000)
     end.
 
 
