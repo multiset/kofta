@@ -106,15 +106,20 @@ format_return(State) ->
     HasWaiters = dict:size(Clients) > 0,
     TimedOut = timer:now_diff(os:timestamp(), LastBatch) / 1000 >= MaxLatency,
     % is_empty isn't in r16
-    case HasWaiters and TimedOut of
+    case HasWaiters of
         false ->
             {noreply, State};
         true ->
-            case make_request(State) of
-                {ok, NewState} ->
-                    {noreply, NewState, get_timeout(NewState)};
-                {error, Reason, NewState} ->
-                    {stop, Reason, NewState}
+            case TimedOut of
+                true ->
+                    case make_request(State) of
+                        {ok, NewState} ->
+                            {noreply, NewState, get_timeout(NewState)};
+                        {error, Reason, NewState} ->
+                            {stop, Reason, NewState}
+                    end;
+                false ->
+                    {noreply, State, get_timeout(State)}
             end
     end.
 
