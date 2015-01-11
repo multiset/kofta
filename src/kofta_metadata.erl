@@ -91,8 +91,12 @@ get_leader(TopicName, PartitionID) ->
     Error :: any().
 
 get_broker(BrokerID) ->
-    {ok, {Host, Port}} = kofta_cluster:active_broker(),
-    gen_fsm:sync_send_event(name(Host, Port), {broker, BrokerID}).
+    case kofta_cluster:active_broker() of
+        {ok, {Host, Port}} ->
+            gen_fsm:sync_send_event(name(Host, Port), {broker, BrokerID});
+        {error, Reason} ->
+            {error, Reason}
+    end.
 
 
 -spec lookup(TopicName) -> {ok, [PartError | PartResponse]} | Error when
@@ -102,30 +106,35 @@ get_broker(BrokerID) ->
     Error :: {error, any()}.
 
 lookup(TopicName) ->
-    {ok, {Host, Port}} = kofta_cluster:active_broker(),
-    case gen_fsm:sync_send_event(name(Host, Port), {lookup, TopicName}) of
-        {ok, Topic} ->
-            lists:map(fun(#partition{id=ID, leader=Leader}) ->
-                ets_lru:insert(kofta_leader_lru, {TopicName, ID}, Leader)
-            end, Topic#topic.partitions),
-            case Topic#topic.status of
-                ok ->
-                    Partitions = lists:map(fun(Partition) ->
-                        #partition{
-                            id=PartitionID,
-                            leader=Leader,
-                            status=Status
-                        } = Partition,
-                        case Status of
-                            ok ->
-                                {ok, PartitionID, Leader};
-                            Error ->
-                                {error, PartitionID, Error}
-                        end
+    case kofta_cluster:active_broker() of
+        {ok, {Host, Port}} ->
+            Name = name(Host, Port),
+            case gen_fsm:sync_send_event(Name, {lookup, TopicName}) of
+                {ok, Topic} ->
+                    lists:map(fun(#partition{id=ID, leader=Leader}) ->
+                        ets_lru:insert(kofta_leader_lru, {TopicName, ID}, Leader)
                     end, Topic#topic.partitions),
-                    {ok, Partitions};
-                Error ->
-                    {error, Error}
+                    case Topic#topic.status of
+                        ok ->
+                            Partitions = lists:map(fun(Partition) ->
+                                #partition{
+                                    id=PartitionID,
+                                    leader=Leader,
+                                    status=Status
+                                } = Partition,
+                                case Status of
+                                    ok ->
+                                        {ok, PartitionID, Leader};
+                                    Error ->
+                                        {error, PartitionID, Error}
+                                end
+                            end, Topic#topic.partitions),
+                            {ok, Partitions};
+                        Error ->
+                            {error, Error}
+                    end;
+                {error, Reason} ->
+                    {error, Reason}
             end;
         {error, Reason} ->
             {error, Reason}
