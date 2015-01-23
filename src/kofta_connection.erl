@@ -32,7 +32,7 @@
 
 -include("kofta.hrl").
 
--define(SOCK_OPTS, [binary, {packet, 0}, {active, false}]).
+-define(SOCK_OPTS, [binary, {packet, 0}, {active, false}, {nodelay, true}]).
 
 
 -spec request(Host, Port, Msg) -> Response when
