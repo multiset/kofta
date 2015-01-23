@@ -26,6 +26,7 @@ init([]) ->
     ),
     folsom_metrics:new_counter([kofta, requests, success]),
     folsom_metrics:new_counter([kofta, requests, timeout]),
+    folsom_metrics:new_counter([kofta, requests, error]),
     folsom_metrics:new_counter([kofta, connections, inits, success]),
     folsom_metrics:new_counter([kofta, connections, inits, failure]),
     folsom_metrics:new_counter([kofta, cluster, broker_activations]),
