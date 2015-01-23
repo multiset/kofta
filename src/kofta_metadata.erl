@@ -51,6 +51,8 @@
     status
 }).
 
+-include("kofta.hrl").
+
 
 -spec get_leader(TopicName, PartitionID) -> {ok, Leader} | Error when
     TopicName :: binary(),
@@ -61,8 +63,10 @@
 get_leader(TopicName, PartitionID) ->
     case ets_lru:lookup_d(kofta_leader_lru, {TopicName, PartitionID}) of
         {ok, Leader} ->
+            ?INCREMENT_COUNTER([kofta, metadata, leader_lru_hits]),
             {ok, Leader};
         not_found ->
+            ?INCREMENT_COUNTER([kofta, metadata, leader_lru_misses]),
             case lookup(TopicName) of
                 {ok, Partitions} ->
                     Partition = lists:keyfind(
@@ -72,13 +76,23 @@ get_leader(TopicName, PartitionID) ->
                     ),
                     case Partition of
                         false ->
+                            ?INCREMENT_COUNTER(
+                                [kofta, metadata, bad_partitions]
+                            ),
                             {error, bad_partition};
                         {ok, _PartID, Leader} ->
+                            ?INCREMENT_COUNTER(
+                                [kofta, metadata, leader_lru_recoveries]
+                            ),
                             {ok, Leader};
                         {error, _PartID, Reason} ->
+                            ?INCREMENT_COUNTER(
+                                [kofta, metadata, lookup_errors]
+                            ),
                             {error, Reason}
                     end;
                 {error, Reason} ->
+                    ?INCREMENT_COUNTER([kofta, metadata, lookup_errors]),
                     {error, Reason}
             end
     end.
@@ -236,8 +250,10 @@ code_change(_OldVsn, StateName, State, _Extra) ->
 reconnect(Host, Port) ->
     case do_request([], Host, Port) of
         {ok, _Brokers, _Topics} ->
+            ?INCREMENT_COUNTER([kofta, metadata, reconnects, success]),
             true;
         {error, _Reason} ->
+            ?INCREMENT_COUNTER([kofta, metadata, reconnects, failure]),
             false
     end.
 
@@ -246,8 +262,10 @@ do_request(TopicNames, Host, Port) ->
     Data = encode(TopicNames),
     case kofta_connection:request(Host, Port, Data) of
         {ok, Response} ->
+            ?INCREMENT_COUNTER([kofta, metadata, requests, success]),
             decode(Response);
         {error, Reason} ->
+            ?INCREMENT_COUNTER([kofta, metadata, requests, failure]),
             {error, Reason}
     end.
 

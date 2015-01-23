@@ -30,6 +30,8 @@
     last_response
 }).
 
+-include("kofta.hrl").
+
 -define(SOCK_OPTS, [binary, {packet, 0}, {active, false}]).
 
 
@@ -52,7 +54,8 @@ request(Host, Port, Msg) ->
 
 request(Host, Port, Msg, Timeout) ->
     PoolName = kofta_connection:name(Host, Port),
-    transact(
+    T0 = os:timestamp(),
+    Response = transact(
         PoolName,
         fun(Worker, WorkerTimeout) ->
             Ref = make_ref(),
@@ -61,7 +64,10 @@ request(Host, Port, Msg, Timeout) ->
         end,
         50,
         Timeout
-    ).
+    ),
+    Delta = timer:now_diff(os:timestamp(), T0) div 1000,
+    ?UPDATE_HISTOGRAM([kofta, requests, latency], Delta),
+    Response.
 
 -spec transact(Pool, Fun, Backoff, Timeout) -> Response when
     Pool :: atom(),
@@ -71,12 +77,20 @@ request(Host, Port, Msg, Timeout) ->
     FunResponse :: any(),
     Response :: FunResponse | {error, timeout}.
 
-transact(Pool, Fun, Backoff, Timeout) when Timeout > 0 ->
+transact(Pool, Fun, Backoff, Timeout) ->
+    Now = os:timestamp(),
+    random:seed(Now),
+    transact(Now, Pool, Fun, Backoff, Timeout).
+
+transact(StartTime, Pool, Fun, Backoff0, Timeout) when Timeout > 0 ->
     try poolboy:checkout(Pool, false, Timeout) of
         full ->
-            timer:sleep(min(Backoff, Timeout)),
-            transact(Pool, Fun, Backoff * 2, Timeout - Backoff);
+            Backoff1 = trunc(Backoff0 * (1 + random:uniform())),
+            timer:sleep(min(Backoff1, Timeout)),
+            transact(Pool, Fun, Backoff1, Timeout - Backoff1);
         Worker ->
+            Delta = timer:now_diff(os:timestamp(), StartTime) div 1000,
+            ?UPDATE_HISTOGRAM([kofta, requests, checkout_latency], Delta),
             try
                 Fun(Worker, Timeout)
             catch exit:{timeout, _} ->
@@ -87,7 +101,7 @@ transact(Pool, Fun, Backoff, Timeout) when Timeout > 0 ->
     catch exit:{timeout, _} ->
         {error, timeout}
     end;
-transact(_, _, _, _) ->
+transact(_, _, _, _, _) ->
     {error, timeout}.
 
 
@@ -103,10 +117,12 @@ accumulate_response(Ref, Acc, Timeout) ->
         {Ref, {cont, Data}} ->
             accumulate_response(Ref, <<Acc/binary, Data/binary>>, Timeout);
         {Ref, {done, Data}} ->
+            ?INCREMENT_COUNTER([kofta, requests, success]),
             {ok, <<Acc/binary, Data/binary>>};
         {_OldRef, _Msg} ->
             accumulate_response(Ref, Acc, Timeout)
     after Timeout ->
+        ?INCREMENT_COUNTER([kofta, requests, timeout]),
         {error, timeout}
     end.
 
@@ -137,8 +153,10 @@ handle_info(timeout, State) ->
     #st{host=Host, port=Port} = State,
     case gen_tcp:connect(Host, Port, ?SOCK_OPTS) of
         {ok, Sock} ->
+            ?INCREMENT_COUNTER([kofta, connections, inits, success]),
             go(State#st{sock=Sock});
         {error, _Reason} ->
+            ?INCREMENT_COUNTER([kofta, connections, inits, failure]),
             {noreply, State, 1000}
     end.
 
