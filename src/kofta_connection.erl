@@ -23,24 +23,23 @@
 -record(st, {
     host,
     port,
+    opts,
     sock,
-    from,
-    request,
-    timeout,
-    last_response
+    reqtime
 }).
 
--define(SOCK_OPTS, [binary, {packet, 0}, {active, false}]).
+-include("kofta.hrl").
 
 
 -spec request(Host, Port, Msg) -> Response when
     Host :: binary(),
     Port :: integer(),
     Msg :: binary(),
-    Response :: any().
+    Response :: {ok, binary()} | {error, atom()}.
 
 request(Host, Port, Msg) ->
-    request(Host, Port, Msg, 5000).
+    {ok, Timeout} = application:get_env(kofta, request_timeout),
+    request(Host, Port, Msg, Timeout).
 
 
 -spec request(Host, Port, Msg, Timeout) -> Response when
@@ -48,67 +47,45 @@ request(Host, Port, Msg) ->
     Port :: integer(),
     Msg :: binary(),
     Timeout :: integer(),
-    Response :: any() | {error, atom()}.
+    Response :: {ok, binary()} | {error, atom()}.
 
 request(Host, Port, Msg, Timeout) ->
+    StartTime = os:timestamp(),
+    Response = request(StartTime, Host, Port, Msg, 50, Timeout),
+    TDelta = timer:now_diff(os:timestamp(), StartTime) div 1000,
+    ?UPDATE_HISTOGRAM([kofta, requests, latency], TDelta),
+    Class = case Response of
+        {ok, _} -> success;
+        {error, timeout} -> timeout;
+        {error, _} -> error
+    end,
+    ?INCREMENT_COUNTER([kofta, requests, Class]),
+    Response.
+
+
+request(StartTime, Host, Port, Msg, Backoff0, Timeout) when Timeout > 0 ->
     PoolName = kofta_connection:name(Host, Port),
-    transact(
-        PoolName,
-        fun(Worker, WorkerTimeout) ->
-            Ref = make_ref(),
-            Worker ! {'$gen_call', {self(), Ref}, {req, Msg, WorkerTimeout}},
-            accumulate_response(Ref, <<>>, WorkerTimeout)
-        end,
-        50,
-        Timeout
-    ).
-
--spec transact(Pool, Fun, Backoff, Timeout) -> Response when
-    Pool :: atom(),
-    Fun :: fun((pid(), pos_integer()) -> FunResponse),
-    Backoff :: pos_integer(),
-    Timeout :: non_neg_integer(),
-    FunResponse :: any(),
-    Response :: FunResponse | {error, timeout}.
-
-transact(Pool, Fun, Backoff, Timeout) when Timeout > 0 ->
-    try poolboy:checkout(Pool, false, Timeout) of
+    try poolboy:checkout(PoolName, false, Timeout) of
         full ->
-            timer:sleep(min(Backoff, Timeout)),
-            transact(Pool, Fun, Backoff * 2, Timeout - Backoff);
+            Backoff1 = trunc(Backoff0 * (1 + random:uniform())),
+            timer:sleep(min(Backoff1, Timeout)),
+            request(StartTime, Host, Port, Msg, Backoff1, Timeout - Backoff1);
         Worker ->
+            TDelta = timer:now_diff(os:timestamp(), StartTime) div 1000,
+            ?UPDATE_HISTOGRAM([kofta, requests, checkout_latency], TDelta),
             try
-                Fun(Worker, Timeout)
+                gen_server:call(Worker, {req, Msg}, Timeout)
             catch exit:{timeout, _} ->
+                exit(Worker, kill),
                 {error, timeout}
             after
-                ok = poolboy:checkin(Pool, Worker)
+                ok = poolboy:checkin(PoolName, Worker)
             end
     catch exit:{timeout, _} ->
         {error, timeout}
     end;
-transact(_, _, _, _) ->
+request(_, _, _, _, _, _) ->
     {error, timeout}.
-
-
--spec accumulate_response(Ref, Acc, Timeout) -> {ok, Response} | Error when
-    Ref :: reference(),
-    Acc :: binary(),
-    Timeout :: integer(),
-    Response :: binary(),
-    Error :: {error, binary()}.
-
-accumulate_response(Ref, Acc, Timeout) ->
-    receive
-        {Ref, {cont, Data}} ->
-            accumulate_response(Ref, <<Acc/binary, Data/binary>>, Timeout);
-        {Ref, {done, Data}} ->
-            {ok, <<Acc/binary, Data/binary>>};
-        {_OldRef, _Msg} ->
-            accumulate_response(Ref, Acc, Timeout)
-    after Timeout ->
-        {error, timeout}
-    end.
 
 
 start_link([Host, Port]) ->
@@ -116,31 +93,48 @@ start_link([Host, Port]) ->
 
 
 init([Host, Port]) ->
-    {ok, #st{host=Host, port=Port}}.
+    Opts = [binary, {packet, 0}, {active, false}, {nodelay, true}],
+    {ok, #st{host=Host, port=Port, opts=Opts}}.
 
 
-handle_call({req, Binary, Timeout}, From, State) ->
-    NewState = State#st{
-        from=From,
-        request=Binary,
-        timeout=Timeout,
-        last_response=os:timestamp()
-    },
-    go(NewState).
+handle_call(Msg, From, #st{sock=undefined}=State) ->
+    #st{host=Host, port=Port, opts=Opts} = State,
+    case gen_tcp:connect(Host, Port, Opts) of
+        {ok, Socket} ->
+            handle_call(Msg, From, State#st{sock=Socket});
+        {error, _Reason} ->
+            {reply, {error, no_connection}, State}
+    end;
+handle_call({req, Binary}, _From, #st{sock=Socket}=State) ->
+    case gen_tcp:send(Socket, Binary) of
+        {error, SendError} ->
+            lager:warning(
+                "kofta_connection received error on send: ~p",
+                [SendError]
+            ),
+            gen_tcp:close(Socket),
+            {reply, {error, failed_to_send}, State#st{sock=undefined}};
+        ok ->
+            case accumulate_response(Socket) of
+                {ok, Data} ->
+                    {reply, {ok, Data}, State};
+                Else ->
+                    gen_tcp:close(Socket),
+                    lager:warning(
+                        "kofta_connection received error on recv: ~p",
+                        [Else]
+                    ),
+                    {reply, Else, State#st{sock=undefined}}
+            end
+    end.
 
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
 
-handle_info(timeout, State) ->
-    #st{host=Host, port=Port} = State,
-    case gen_tcp:connect(Host, Port, ?SOCK_OPTS) of
-        {ok, Sock} ->
-            go(State#st{sock=Sock});
-        {error, _Reason} ->
-            {noreply, State, 1000}
-    end.
+handle_info(_Msg, State) ->
+    {noreply, State}.
 
 
 terminate(_Reason, _State) ->
@@ -151,95 +145,26 @@ code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
 
--spec format_response(State) -> {Reply, State} | {Reply, State, Timeout} when
-    State :: #st{},
-    Reply :: noreply,
-    Timeout :: integer().
-
-format_response(State) ->
-    #st{
-        timeout=MaxTimeout,
-        last_response=Last
-    } = State,
-    case timer:now_diff(Last, os:timestamp()) of
-        Diff when Diff >= MaxTimeout ->
-            NewState = State#st{
-                from=undefined,
-                request=undefined,
-                timeout=undefined,
-                last_response=undefined
-            },
-            {noreply, NewState};
-        _Diff ->
-            {noreply, State, 1000}
-    end.
-
--spec go(State) -> {Reply, State} | {Reply, State, Timeout} when
-    State :: #st{},
-    Reply :: noreply,
-    Timeout :: integer().
-
-go(#st{sock=undefined}=State) ->
-    #st{host=Host, port=Port} = State,
-    case gen_tcp:connect(Host, Port, ?SOCK_OPTS) of
-        {ok, Sock} ->
-            go(State#st{sock=Sock});
-        {error, _Reason} ->
-            format_response(State)
-    end;
-
-go(State) ->
-    #st{
-        sock=Sock,
-        request=Binary,
-        timeout=Timeout
-    } = State,
-    case gen_tcp:send(Sock, Binary) of
-        ok ->
-            case gen_tcp:recv(Sock, 0, Timeout) of
-                {ok, Data} ->
-                    <<Size:32/big-signed-integer, Rest/binary>> = Data,
-                    RestBytes = Size-byte_size(Rest),
-                    case stream_response(State, RestBytes, Data) of
-                        {ok, NewState} ->
-                            {noreply, NewState};
-                        {error, _Reason, NewState} ->
-                            format_response(NewState)
-                    end;
-                {error, _RecvError} ->
-                    format_response(State)
-            end;
-        {error, _SendError} ->
-            format_response(State)
-    end.
-
-
--spec stream_response(State, BytesToRecv, Prev) -> {ok, State} | Error when
-    State :: #st{},
-    BytesToRecv :: integer(),
-    Prev :: binary(),
-    Error :: {error, any(), #st{}}.
-
-stream_response(State, 0, Last) ->
-    #st{from=From} = State,
-    gen_server:reply(From, {done, Last}),
-    NewState = State#st{
-        from=undefined,
-        request=undefined,
-        timeout=undefined,
-        last_response=undefined
-    },
-    {ok, NewState};
-
-stream_response(State, Remaining, Last) ->
-    #st{from=From, sock=Sock, timeout=Timeout} = State,
-    gen_server:reply(From, {cont, Last}),
-    NewState = State#st{last_response=os:timestamp()},
-    case gen_tcp:recv(Sock, 0, Timeout) of
+accumulate_response(Socket) ->
+    case gen_tcp:recv(Socket, 0) of
         {ok, Data} ->
-            stream_response(NewState, Remaining-byte_size(Data), Data);
-        {error, Reason} ->
-            {error, Reason, NewState}
+            <<Size:32/big-signed-integer, Rest/binary>> = Data,
+            BytesLeft = Size - byte_size(Rest),
+            accumulate_response(Socket, BytesLeft, Data);
+        Else ->
+            Else
+    end.
+
+accumulate_response(_, 0, Acc) ->
+    {ok, Acc};
+accumulate_response(Socket, BytesLeft0, Acc0) ->
+    case gen_tcp:recv(Socket, 0) of
+        {ok, Data} ->
+            BytesLeft1 = BytesLeft0 - byte_size(Data),
+            Acc1 = <<Acc0/binary, Data/binary>>,
+            accumulate_response(Socket, BytesLeft1, Acc1);
+        Else ->
+            Else
     end.
 
 

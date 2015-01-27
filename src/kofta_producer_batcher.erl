@@ -27,6 +27,8 @@
     port
 }).
 
+-include("kofta.hrl").
+
 
 -spec send(TopicName, Partition, [{Key, Value}]) -> {ok, Offset} | Error when
     TopicName :: binary(),
@@ -70,6 +72,7 @@ init([Host, Port]) ->
 
 handle_call({msg, Topic, Partition, KVs}, From, State0) ->
     #st{clients=Clients, msgs=Msgs} = State0,
+    ?INCREMENT_COUNTER([kofta, producer, messages, received], length(KVs)),
     State1 = State0#st{
         clients=dict:append({Topic, Partition}, From, Clients),
         msgs=dict:append_list({Topic, Partition}, KVs, Msgs)
@@ -114,8 +117,14 @@ format_return(State) ->
                 true ->
                     case make_request(State) of
                         {ok, NewState} ->
+                            ?INCREMENT_COUNTER(
+                                [kofta, producer, requests, success]
+                            ),
                             {noreply, NewState, get_timeout(NewState)};
                         {error, Reason, NewState} ->
+                            ?INCREMENT_COUNTER(
+                                [kofta, producer, requests, failure]
+                            ),
                             {stop, Reason, NewState}
                     end;
                 false ->
@@ -158,6 +167,10 @@ make_request(State) ->
 
     ProduceBinBody = kofta_encode:array(fun({Topic, Partitions}) ->
         PartBin = kofta_encode:array(fun({PartID, Msgs}) ->
+            ?INCREMENT_COUNTER(
+                [kofta, producer, messages, transmitted],
+                length(Msgs)
+            ),
             MsgSet = kofta_encode:message_set(Msgs),
             [<<PartID:32/big-signed-integer,
              (iolist_size(MsgSet)):32/big-signed-integer>>,

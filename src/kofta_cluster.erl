@@ -7,12 +7,15 @@
     active_broker/0
 ]).
 
+-include("kofta.hrl").
+
 
 -spec activate_broker(Host, Port) -> ok when
     Host :: binary(),
     Port :: integer().
 
 activate_broker(Host, Port) ->
+    ?INCREMENT_COUNTER([kofta, cluster, broker_activations]),
     true = ets:insert(active_brokers, {{Host, Port}}),
     ok.
 
@@ -22,6 +25,7 @@ activate_broker(Host, Port) ->
     Port :: integer().
 
 deactivate_broker(Host, Port) ->
+    ?INCREMENT_COUNTER([kofta, cluster, broker_deactivations]),
     true = ets:delete(active_brokers, {Host, Port}),
     ok.
 
@@ -35,8 +39,10 @@ active_broker() ->
     Size = length(Tab),
     case Size of
         0 ->
+            ?INCREMENT_COUNTER([kofta, cluster, all_brokers_down]),
             {error, all_brokers_down};
         _ ->
+            ?INCREMENT_COUNTER([kofta, cluster, broker_lookups]),
             RandomIndex = element(1, random:uniform_s(Size, os:timestamp())),
             {Broker} = lists:nth(RandomIndex, Tab),
             {ok, Broker}

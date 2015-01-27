@@ -12,7 +12,7 @@ compile:
 	@./rebar compile
 
 run:
-	@erl -pa deps/*/ebin -pa ebin -s lager -s kofta
+	@erl -pa deps/*/ebin -pa ebin -s lager -s folsom -s kofta
 
 test: eunit
 
