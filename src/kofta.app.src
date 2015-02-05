@@ -1,6 +1,6 @@
 {application, kofta, [
     {description, "A Kafka 0.8.x client"},
-    {vsn, "1"},
+    {vsn, git},
     {registered, []},
     {applications, [
         kernel,
