@@ -225,7 +225,7 @@ make_request(State) ->
             NewState = State#st{
                 clients=dict:new(),
                 msgs=dict:new(),
-                last_batch=now()
+                last_batch=os:timestamp()
             },
             {ok, NewState}
     end.
