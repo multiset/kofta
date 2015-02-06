@@ -107,20 +107,20 @@ format_return(State) ->
         max_latency=MaxLatency
     } = State,
     HasWaiters = dict:size(Clients) > 0,
-    TimedOut = timer:now_diff(os:timestamp(), LastBatch) / 1000 >= MaxLatency,
+    Latency = round(timer:now_diff(os:timestamp(), LastBatch) / 1000),
     % is_empty isn't in r16
     case HasWaiters of
         false ->
             {noreply, State};
         true ->
-            case TimedOut of
+            case Latency >= MaxLatency of
                 true ->
                     case make_request(State) of
                         {ok, NewState} ->
                             ?INCREMENT_COUNTER(
                                 [kofta, producer, requests, success]
                             ),
-                            {noreply, NewState, get_timeout(NewState)};
+                            {noreply, NewState, MaxLatency};
                         {error, Reason, NewState} ->
                             ?INCREMENT_COUNTER(
                                 [kofta, producer, requests, failure]
@@ -128,7 +128,7 @@ format_return(State) ->
                             {stop, Reason, NewState}
                     end;
                 false ->
-                    {noreply, State, get_timeout(State)}
+                    {noreply, State, MaxLatency - Latency}
             end
     end.
 
@@ -225,28 +225,9 @@ make_request(State) ->
             NewState = State#st{
                 clients=dict:new(),
                 msgs=dict:new(),
-                last_batch=now()
+                last_batch=os:timestamp()
             },
             {ok, NewState}
-    end.
-
-
--spec get_timeout(State) -> Timeout when
-    State :: #st{},
-    Timeout :: integer().
-
-get_timeout(State) ->
-    #st{
-        last_batch=LastBatch,
-        max_latency=MaxLatency
-    } = State,
-
-    NowDiff = timer:now_diff(os:timestamp(), LastBatch)/1000,
-    case NowDiff - MaxLatency of
-        Diff when Diff < 0 ->
-            0;
-        Diff ->
-            round(Diff/1000)
     end.
 
 
