@@ -26,12 +26,12 @@ init([Host, Port]) ->
         poolboy:child_spec(PoolName, PoolArgs, [Host, Port]),
         {
             kofta_producer_batcher:name(Host, Port),
-            {kofta_metadata, start_link, [Host, Port]},
+            {kofta_producer_batcher, start_link, [Host, Port]},
             transient, 5000, worker, [kofta_metadata]
         },
         {
             kofta_metadata:name(Host, Port),
-            {kofta_producer_batcher, start_link, [Host, Port]},
+            {kofta_metadata, start_link, [Host, Port]},
             transient, 5000, worker, [kofta_producer_batcher]
         }
     ]}}.
